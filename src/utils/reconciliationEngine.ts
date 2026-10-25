@@ -37,6 +37,41 @@ export interface ReconciliationResult {
   };
 }
 
+function buildSafeExcelSheetName(
+  po: string,
+  so: string,
+  contIdx: number,
+  usedNames: Set<string>
+): string {
+  const clean = (s: string) => s.replace(/[:\\/?*\[\]\s]+/g, '').trim();
+  const cPo = clean(po) || `C${contIdx}`;
+  const cSo = clean(so);
+
+  // Shorten SO if needed so both PO and SO fit inside 31 chars
+  const soShort = cSo.length > 10 ? cSo.slice(-6) : cSo;
+  let candidate = cSo ? `PO${cPo}_SO${cSo}` : `PO_${cPo}`;
+  if (candidate.length > 31) {
+    candidate = `PO${cPo}_SO${soShort}`;
+  }
+  if (candidate.length > 31) {
+    candidate = `${cPo}_${soShort}`.slice(0, 31);
+  }
+
+  let finalName = candidate;
+  if (usedNames.has(finalName)) {
+    const suffix = `_C${contIdx}`;
+    finalName = `${candidate.slice(0, 31 - suffix.length)}${suffix}`;
+  }
+  let counter = 2;
+  while (usedNames.has(finalName)) {
+    const suffix = `_${counter}`;
+    finalName = `${candidate.slice(0, 31 - suffix.length)}${suffix}`;
+    counter++;
+  }
+  usedNames.add(finalName);
+  return finalName;
+}
+
 export function reconcileShipmentPlan(
   stockItems: StockItem[],
   planLines: ShipmentLine[],
@@ -51,116 +86,145 @@ export function reconcileShipmentPlan(
     });
   }
 
-  // Remaining inventory for FIFO allocation (prioritizing Warehouse 60 finished goods, then Warehouse 01)
-  const rem60 = new Map<string, number>();
-  const rem01 = new Map<string, number>();
+  // Global remaining inventory for FIFO cumulative mode across containers
+  const globalRem60 = new Map<string, number>();
+  const globalRem01 = new Map<string, number>();
   for (const s of stockItems) {
-    rem60.set(s.code.trim(), s.wh60Qty);
-    rem01.set(s.code.trim(), s.wh01Qty);
+    globalRem60.set(s.code.trim(), s.wh60Qty);
+    globalRem01.set(s.code.trim(), s.wh01Qty);
+  }
+
+  // Group lines by Container + PO + SO first so per-container mode ("direct") calculates each container independently
+  const contGroupOrder: string[] = [];
+  const rawContGroups = new Map<string, ShipmentLine[]>();
+  for (const line of planLines) {
+    const cIdx = line.containerIndex || 0;
+    const po = line.po || 'NO-PO';
+    const so = line.so || '';
+    const gKey = `${cIdx}__${po}__${so}`;
+    if (!rawContGroups.has(gKey)) {
+      contGroupOrder.push(gKey);
+      rawContGroups.set(gKey, []);
+    }
+    rawContGroups.get(gKey)!.push(line);
   }
 
   const reconciledLines: ReconciledOrderLine[] = [];
-
-  for (const line of planLines) {
-    const code = line.itemCode.trim();
-    const init = stockMap.get(code) || { wh01: 0, wh60: 0, total: 0 };
-    const reqQty = line.qty;
-
-    // Direct check against initial total stock (WH 01 + WH 60)
-    const directShortageQty = Math.max(0, reqQty - init.total);
-    const directStatus: 'FULFILLED' | 'SHORTAGE' = directShortageQty === 0 ? 'FULFILLED' : 'SHORTAGE';
-
-    // FIFO cumulative check
-    const cur60 = rem60.get(code) ?? 0;
-    const cur01 = rem01.get(code) ?? 0;
-    const availBefore = mode === 'fifo' ? cur60 + cur01 : init.total;
-
-    let alloc60 = 0;
-    let alloc01 = 0;
-
-    if (mode === 'fifo') {
-      alloc60 = Math.min(cur60, reqQty);
-      const remNeeded = reqQty - alloc60;
-      alloc01 = Math.min(cur01, remNeeded);
-      rem60.set(code, cur60 - alloc60);
-      rem01.set(code, cur01 - alloc01);
-    } else {
-      alloc60 = Math.min(init.wh60, reqQty);
-      const remNeeded = reqQty - alloc60;
-      alloc01 = Math.min(init.wh01, remNeeded);
-    }
-
-    const allocatedTotal = alloc60 + alloc01;
-    const shortageQty = Math.max(0, reqQty - allocatedTotal);
-    const stockAfterLine = Math.max(0, availBefore - allocatedTotal);
-    const fulfillmentRate = reqQty > 0 ? (allocatedTotal / reqQty) * 100 : 100;
-
-    let fulfillmentStatus: 'FULFILLED' | 'PARTIAL_SHORTAGE' | 'ZERO_STOCK' = 'FULFILLED';
-    if (shortageQty > 0) {
-      fulfillmentStatus = allocatedTotal > 0 ? 'PARTIAL_SHORTAGE' : 'ZERO_STOCK';
-    }
-
-    reconciledLines.push({
-      ...line,
-      wh01Initial: init.wh01,
-      wh60Initial: init.wh60,
-      totalStockInitial: init.total,
-      stockBeforeLine: availBefore,
-      allocatedWh60: alloc60,
-      allocatedWh01: alloc01,
-      allocatedTotal,
-      shortageQty,
-      stockAfterLine,
-      fulfillmentRate,
-      fulfillmentStatus,
-      directStatus,
-      directShortageQty
-    });
-  }
-
-  const fulfilledLines = reconciledLines.filter((l) => l.shortageQty === 0);
-  const shortageLines = reconciledLines.filter((l) => l.shortageQty > 0);
-
-  // Group by PO
-  const poGroupMap = new Map<string, ReconciledOrderLine[]>();
-  for (const l of reconciledLines) {
-    const key = l.po || `NO-PO-${l.containerIndex}`;
-    const arr = poGroupMap.get(key) || [];
-    arr.push(l);
-    poGroupMap.set(key, arr);
-  }
-
   const poSummaries: ReconciledPoSummary[] = [];
-  for (const [poKey, lines] of poGroupMap.entries()) {
-    const totalReq = lines.reduce((acc, x) => acc + x.qty, 0);
-    const totalAlloc = lines.reduce((acc, x) => acc + x.allocatedTotal, 0);
-    const totalShort = lines.reduce((acc, x) => acc + x.shortageQty, 0);
-    const fulfilledCnt = lines.filter((x) => x.shortageQty === 0).length;
-    const shortCnt = lines.length - fulfilledCnt;
-    const soSet = Array.from(new Set(lines.map((x) => x.so).filter(Boolean)));
-    const first = lines[0];
+  const usedSheetNames = new Set<string>();
+
+  for (const gKey of contGroupOrder) {
+    const groupLines = rawContGroups.get(gKey)!;
+
+    // In 'direct' mode (Tính riêng từng Cont theo SO & PO), each container starts with full Warehouse 01 + 60 stock
+    const contRem60 = new Map<string, number>();
+    const contRem01 = new Map<string, number>();
+    if (mode === 'direct') {
+      for (const s of stockItems) {
+        contRem60.set(s.code.trim(), s.wh60Qty);
+        contRem01.set(s.code.trim(), s.wh01Qty);
+      }
+    }
+
+    const activeRem60 = mode === 'fifo' ? globalRem60 : contRem60;
+    const activeRem01 = mode === 'fifo' ? globalRem01 : contRem01;
+
+    const reconciledGroupLines: ReconciledOrderLine[] = [];
+
+    for (const line of groupLines) {
+      const code = line.itemCode.trim();
+      const init = stockMap.get(code) || { wh01: 0, wh60: 0, total: 0 };
+      const reqQty = line.qty;
+
+      const directShortageQty = Math.max(0, reqQty - init.total);
+      const directStatus: 'FULFILLED' | 'SHORTAGE' =
+        directShortageQty === 0 ? 'FULFILLED' : 'SHORTAGE';
+
+      const cur60 = activeRem60.get(code) ?? 0;
+      const cur01 = activeRem01.get(code) ?? 0;
+      const availBefore = cur60 + cur01;
+
+      const alloc60 = Math.min(cur60, reqQty);
+      const remNeeded = reqQty - alloc60;
+      const alloc01 = Math.min(cur01, remNeeded);
+
+      activeRem60.set(code, cur60 - alloc60);
+      activeRem01.set(code, cur01 - alloc01);
+
+      const allocatedTotal = alloc60 + alloc01;
+      const shortageQty = Math.max(0, reqQty - allocatedTotal);
+      const stockAfterLine = Math.max(0, availBefore - allocatedTotal);
+      const fulfillmentRate = reqQty > 0 ? (allocatedTotal / reqQty) * 100 : 100;
+
+      let fulfillmentStatus: 'FULFILLED' | 'PARTIAL_SHORTAGE' | 'ZERO_STOCK' = 'FULFILLED';
+      if (shortageQty > 0) {
+        fulfillmentStatus = allocatedTotal > 0 ? 'PARTIAL_SHORTAGE' : 'ZERO_STOCK';
+      }
+
+      const recLine: ReconciledOrderLine = {
+        ...line,
+        wh01Initial: init.wh01,
+        wh60Initial: init.wh60,
+        totalStockInitial: init.total,
+        stockBeforeLine: availBefore,
+        allocatedWh60: alloc60,
+        allocatedWh01: alloc01,
+        allocatedTotal,
+        shortageQty,
+        stockAfterLine,
+        fulfillmentRate,
+        fulfillmentStatus,
+        directStatus,
+        directShortageQty
+      };
+
+      reconciledLines.push(recLine);
+      reconciledGroupLines.push(recLine);
+    }
+
+    const first = reconciledGroupLines[0];
+    const totalReq = reconciledGroupLines.reduce((acc, x) => acc + x.qty, 0);
+    const totalAlloc = reconciledGroupLines.reduce((acc, x) => acc + x.allocatedTotal, 0);
+    const totalShort = reconciledGroupLines.reduce((acc, x) => acc + x.shortageQty, 0);
+    const fulfilledCnt = reconciledGroupLines.filter((x) => x.shortageQty === 0).length;
+    const shortLines = reconciledGroupLines.filter((x) => x.shortageQty > 0);
+    const shortCnt = shortLines.length;
+    const soSet = Array.from(new Set(reconciledGroupLines.map((x) => x.so).filter(Boolean)));
+    const sheetNameExcel = buildSafeExcelSheetName(
+      first.po || 'NOPO',
+      first.so || '',
+      first.containerIndex || poSummaries.length + 1,
+      usedSheetNames
+    );
 
     poSummaries.push({
-      po: poKey,
+      id: gKey,
+      po: first.po || `CONT-${first.containerIndex}`,
+      so: first.so || '',
       soList: soSet,
       customer: first.customer,
+      pkl: first.pkl || '',
       loadingDate: first.updatedLoadingDate || first.loadingDate || first.crd,
-      containerIndex: first.containerIndex,
-      totalLines: lines.length,
+      containerIndex: first.containerIndex || poSummaries.length + 1,
+      sheetNameExcel,
+      totalLines: reconciledGroupLines.length,
       fulfilledLinesCount: fulfilledCnt,
       shortageLinesCount: shortCnt,
       totalRequiredQty: totalReq,
       totalAllocatedQty: totalAlloc,
       totalShortageQty: totalShort,
-      totalPkgs: lines.reduce((acc, x) => acc + x.pkgs, 0),
-      totalCbm: lines.reduce((acc, x) => acc + x.cbm, 0),
-      totalAmount: lines.reduce((acc, x) => acc + x.totalAmount, 0),
+      totalPkgs: reconciledGroupLines.reduce((acc, x) => acc + x.pkgs, 0),
+      totalCbm: reconciledGroupLines.reduce((acc, x) => acc + x.cbm, 0),
+      totalAmount: reconciledGroupLines.reduce((acc, x) => acc + x.totalAmount, 0),
       fulfillmentRate: totalReq > 0 ? (totalAlloc / totalReq) * 100 : 100,
       status: shortCnt === 0 ? 'FULFILLED' : 'SHORTAGE',
-      lines
+      lines: reconciledGroupLines,
+      shortageLines: shortLines
     });
   }
 
+  const fulfilledLines = reconciledLines.filter((l) => l.shortageQty === 0);
+  const shortageLines = reconciledLines.filter((l) => l.shortageQty > 0);
   const fulfilledPos = poSummaries.filter((p) => p.status === 'FULFILLED');
   const shortagePos = poSummaries.filter((p) => p.status === 'SHORTAGE');
 
@@ -200,7 +264,9 @@ export function reconcileShipmentPlan(
     });
   }
 
-  itemDemands.sort((a, b) => b.shortageQty - a.shortageQty || b.totalRequiredQty - a.totalRequiredQty);
+  itemDemands.sort(
+    (a, b) => b.shortageQty - a.shortageQty || b.totalRequiredQty - a.totalRequiredQty
+  );
 
   const enoughItems = itemDemands.filter((i) => i.status === 'ENOUGH');
   const shortageItems = itemDemands.filter((i) => i.status === 'SHORTAGE');
@@ -223,8 +289,11 @@ export function reconcileShipmentPlan(
       totalOrderLines: reconciledLines.length,
       fulfilledLinesCount: fulfilledLines.length,
       shortageLinesCount: shortageLines.length,
-      zeroStockLinesCount: reconciledLines.filter((x) => x.fulfillmentStatus === 'ZERO_STOCK').length,
-      partialStockLinesCount: reconciledLines.filter((x) => x.fulfillmentStatus === 'PARTIAL_SHORTAGE').length,
+      zeroStockLinesCount: reconciledLines.filter((x) => x.fulfillmentStatus === 'ZERO_STOCK')
+        .length,
+      partialStockLinesCount: reconciledLines.filter(
+        (x) => x.fulfillmentStatus === 'PARTIAL_SHORTAGE'
+      ).length,
       totalPos: poSummaries.length,
       fulfilledPosCount: fulfilledPos.length,
       shortagePosCount: shortagePos.length,

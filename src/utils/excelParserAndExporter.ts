@@ -3,6 +3,7 @@ import {
   ContainerGroup,
   LeftRightPair,
   PlanDataset,
+  ReconciledPoSummary,
   ShipmentLine,
   StockItem
 } from '../types';
@@ -71,7 +72,6 @@ export function parseStockWorkbook(
     }
   >();
 
-  // Skip header row
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
     if (!row || row.length < 2) continue;
@@ -169,7 +169,6 @@ export function parseShipmentWorkbook(
     let currentLines: ShipmentLine[] = [];
     let contIdx = 1;
 
-    // Detect if sheet is 'Data' format (Customer, Type, PO, LPVN Item code, Feature, Description...)
     const headerRow = (rows[0] || []).map((x: any) => String(x || '').trim().toLowerCase());
     const isDataSheet =
       sname.toLowerCase() === 'data' ||
@@ -315,13 +314,339 @@ export function parseShipmentWorkbook(
     }
   }
 
-  // Fallback if custom sheet name
   if (Object.keys(result).length === 0 && wb.SheetNames.length > 0) {
     const s0 = wb.SheetNames[0];
     result[s0] = parseStandardPlanSheet(s0, planType);
   }
 
   return result;
+}
+
+/**
+ * Helper to build a single Container (PO & SO) worksheet
+ */
+function buildContainerPoSoWorksheet(poGroup: ReconciledPoSummary, allocationMode: string): XLSX.WorkSheet {
+  const rows: any[][] = [
+    [`BÁO CÁO CHI TIẾT CONTAINER XUẤT HÀNG — PO: ${poGroup.po} | SO: ${poGroup.so || 'N/A'}`],
+    [
+      'Số Cont / Block:',
+      `Cont #${String(poGroup.containerIndex).padStart(2, '0')}`,
+      'Khách Hàng:',
+      poGroup.customer,
+      'Ngày Đóng Cont:',
+      poGroup.loadingDate || 'Chưa cập nhật'
+    ],
+    [
+      'Số PO:',
+      poGroup.po,
+      'Số SO:',
+      poGroup.so || poGroup.soList.join(', ') || 'N/A',
+      'Trạng Thái Cont:',
+      poGroup.status === 'FULFILLED'
+        ? 'ĐỦ HÀNG XUẤT CONT 100%'
+        : `THIẾU HÀNG (${poGroup.shortageLinesCount}/${poGroup.totalLines} mã thiếu)`
+    ],
+    [
+      'Tổng SL Đặt Xuất (Pcs):',
+      poGroup.totalRequiredQty,
+      'Tổng SL Đáp Ứng (Kho 01+60):',
+      poGroup.totalAllocatedQty,
+      'Tổng SL Thiếu Hụt (Pcs):',
+      poGroup.totalShortageQty
+    ],
+    [
+      'Tổng Số Kiện (#pkg):',
+      poGroup.totalPkgs,
+      'Tổng Thể Tích (CBM):',
+      Number(poGroup.totalCbm.toFixed(2)),
+      'Tổng Giá Trị (USD):',
+      Number(poGroup.totalAmount.toFixed(2))
+    ],
+    [
+      'Phương Thức Tính:',
+      allocationMode === 'direct'
+        ? 'Tính riêng từng Cont độc lập với Tồn Kho 01 + Kho 60'
+        : 'Tính lũy kế FIFO theo thứ tự Cont xuất'
+    ],
+    []
+  ];
+
+  // Section 1: Missing items summary for this Container (PO & SO)
+  if (poGroup.shortageLines.length > 0) {
+    rows.push([
+      `1. DANH SÁCH CÁC MÃ ĐANG THIẾU CỦA CONT (PO: ${poGroup.po} & SO: ${poGroup.so || 'N/A'}) — THIẾU ${poGroup.shortageLines.length} MÃ`
+    ]);
+    rows.push([
+      'STT',
+      'Số PO',
+      'Số SO',
+      'Mã Hàng Thiếu (LPVN Code)',
+      'Model',
+      'Bên (Trái/Phải)',
+      'Mô Tả Hàng Hóa',
+      'SL Cần Xuất (Qty)',
+      'Tồn Kho 01',
+      'Tồn Kho 60',
+      'Tồn Khả Dụng (01+60)',
+      'SL Đáp Ứng Được',
+      'SỐ LƯỢNG THIẾU (Pcs)',
+      'Tỷ Lệ Đáp Ứng (%)',
+      'Ghi Chú Tình Trạng'
+    ]);
+    poGroup.shortageLines.forEach((l, idx) => {
+      rows.push([
+        idx + 1,
+        l.po,
+        l.so,
+        l.itemCode,
+        l.feature,
+        l.side === 'L' ? 'Trái (LHF)' : l.side === 'R' ? 'Phải (RHF)' : 'Chung',
+        l.description,
+        l.qty,
+        l.wh01Initial,
+        l.wh60Initial,
+        l.stockBeforeLine,
+        l.allocatedTotal,
+        l.shortageQty,
+        Number(l.fulfillmentRate.toFixed(1)),
+        l.fulfillmentStatus === 'ZERO_STOCK' ? 'HẾT TỒN KHO 01+60 (0 Pcs)' : 'THIẾU MỘT PHẦN'
+      ]);
+    });
+    rows.push([
+      '',
+      '',
+      '',
+      'TỔNG CỘNG MÃ THIẾU TRONG CONT:',
+      '',
+      '',
+      '',
+      poGroup.shortageLines.reduce((a, b) => a + b.qty, 0),
+      '',
+      '',
+      '',
+      poGroup.shortageLines.reduce((a, b) => a + b.allocatedTotal, 0),
+      poGroup.totalShortageQty,
+      '',
+      ''
+    ]);
+    rows.push([]);
+  } else {
+    rows.push([
+      `1. TÌNH TRẠNG THIẾU HỤT: CONT (PO: ${poGroup.po} & SO: ${poGroup.so || 'N/A'}) ĐỦ HÀNG XUẤT 100% — KHÔNG THIẾU MÃ NÀO`
+    ]);
+    rows.push([]);
+  }
+
+  // Section 2: Full list of all items in this Container (PO & SO)
+  rows.push([
+    `2. CHI TIẾT TOÀN BỘ CÁC MÃ HÀNG TRONG CONT (PO: ${poGroup.po} & SO: ${poGroup.so || 'N/A'}) — ${poGroup.totalLines} MÃ`
+  ]);
+  rows.push([
+    'STT',
+    'Dòng Excel',
+    'Số PO',
+    'Số SO',
+    'Mã Hàng (LPVN Code)',
+    'Model',
+    'Bên (Trái/Phải)',
+    'Mô Tả Hàng Hóa',
+    'Ngày Xuất Dự Kiến',
+    'SL Cần Xuất (Qty)',
+    'Tồn Kho 01',
+    'Tồn Kho 60',
+    'Tồn Khả Dụng (01+60)',
+    'SL Đáp Ứng',
+    'SL Thiếu Hụt',
+    'Số Kiện (#pkg)',
+    'Thể Tích (CBM)',
+    'Thành Tiền (USD)',
+    'Trạng Thái Mã'
+  ]);
+
+  poGroup.lines.forEach((l, idx) => {
+    rows.push([
+      idx + 1,
+      l.rowNumber,
+      l.po,
+      l.so,
+      l.itemCode,
+      l.feature,
+      l.side === 'L' ? 'Trái (LHF)' : l.side === 'R' ? 'Phải (RHF)' : 'Chung',
+      l.description,
+      l.updatedLoadingDate || l.loadingDate || l.crd,
+      l.qty,
+      l.wh01Initial,
+      l.wh60Initial,
+      l.stockBeforeLine,
+      l.allocatedTotal,
+      l.shortageQty,
+      l.pkgs,
+      Number(l.cbm.toFixed(3)),
+      Number(l.totalAmount.toFixed(2)),
+      l.shortageQty > 0 ? `THIẾU -${l.shortageQty} PCS` : 'ĐỦ HÀNG XUẤT (100%)'
+    ]);
+  });
+
+  rows.push([
+    '',
+    '',
+    '',
+    '',
+    'TỔNG CỘNG TOÀN CONT:',
+    '',
+    '',
+    '',
+    '',
+    poGroup.totalRequiredQty,
+    '',
+    '',
+    '',
+    poGroup.totalAllocatedQty,
+    poGroup.totalShortageQty,
+    poGroup.totalPkgs,
+    Number(poGroup.totalCbm.toFixed(2)),
+    Number(poGroup.totalAmount.toFixed(2)),
+    poGroup.status === 'FULFILLED' ? 'ĐỦ 100%' : `THIẾU -${poGroup.totalShortageQty} PCS`
+  ]);
+
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols'] = [
+    { wch: 6 },
+    { wch: 12 },
+    { wch: 16 },
+    { wch: 16 },
+    { wch: 18 },
+    { wch: 10 },
+    { wch: 14 },
+    { wch: 30 },
+    { wch: 14 },
+    { wch: 16 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 18 },
+    { wch: 14 },
+    { wch: 16 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 16 },
+    { wch: 22 }
+  ];
+  return ws;
+}
+
+/**
+ * Exports an Excel workbook where Sheet 1 is the Master Container Summary,
+ * and EVERY Container has its own dedicated worksheet named after its PO & SO!
+ */
+export function exportContainersByPoSoToExcel(
+  poSummaries: ReconciledPoSummary[],
+  activePlanName: string,
+  allocationMode: string
+) {
+  const wb = XLSX.utils.book_new();
+
+  // Sheet 1: Master Summary of all Containers (SO & PO)
+  const summaryRows: any[][] = [
+    [`BÁO CÁO TỔNG HỢP THEO TỪNG CONT XUẤT (PO & SO) — ${activePlanName.toUpperCase()}`],
+    [
+      'Thời gian xuất:',
+      new Date().toLocaleString('vi-VN'),
+      'Chế độ tính:',
+      allocationMode === 'direct'
+        ? 'Tính riêng từng Cont theo SO & PO (Độc lập với Kho 01 + Kho 60)'
+        : 'Tính lũy kế FIFO theo thứ tự Cont xuất'
+    ],
+    [],
+    [
+      'STT',
+      'Cont #',
+      'Số PO',
+      'Số SO',
+      'Tên Sheet Chi Tiết',
+      'Khách Hàng',
+      'Ngày Xuất Dự Kiến',
+      'Tổng Số Mã',
+      'Số Mã Đủ',
+      'Số Mã Thiếu',
+      'Tổng SL Cont (Pcs)',
+      'SL Đáp Ứng (Pcs)',
+      'SL Thiếu Hụt (Pcs)',
+      'Số Kiện (#pkg)',
+      'Tổng CBM',
+      'Trạng Thái Cont',
+      'Chi Tiết Thiếu Những Mã Nào & Số Lượng Bao Nhiêu'
+    ]
+  ];
+
+  poSummaries.forEach((p, idx) => {
+    const missingDetail =
+      p.shortageLines.length === 0
+        ? 'Đủ hàng 100% (Không thiếu mã nào)'
+        : p.shortageLines
+            .map((l) => `${l.itemCode} (Cần ${l.qty}, Tồn ${l.stockBeforeLine} -> Thiếu -${l.shortageQty})`)
+            .join(' | ');
+
+    summaryRows.push([
+      idx + 1,
+      `Cont #${String(p.containerIndex).padStart(2, '0')}`,
+      p.po,
+      p.so || p.soList.join(', '),
+      p.sheetNameExcel,
+      p.customer,
+      p.loadingDate,
+      p.totalLines,
+      p.fulfilledLinesCount,
+      p.shortageLinesCount,
+      p.totalRequiredQty,
+      p.totalAllocatedQty,
+      p.totalShortageQty,
+      p.totalPkgs,
+      Number(p.totalCbm.toFixed(2)),
+      p.status === 'FULFILLED' ? 'ĐỦ HÀNG XUẤT 100%' : `THIẾU ${p.shortageLinesCount} MÃ`,
+      missingDetail
+    ]);
+  });
+
+  const wsSummary = XLSX.utils.aoa_to_sheet(summaryRows);
+  wsSummary['!cols'] = [
+    { wch: 6 },
+    { wch: 10 },
+    { wch: 18 },
+    { wch: 16 },
+    { wch: 26 },
+    { wch: 22 },
+    { wch: 14 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 16 },
+    { wch: 16 },
+    { wch: 16 },
+    { wch: 14 },
+    { wch: 12 },
+    { wch: 20 },
+    { wch: 85 }
+  ];
+  XLSX.utils.book_append_sheet(wb, wsSummary, '00_TONG_HOP_CONT');
+
+  // Create 1 dedicated sheet for each Container named with its PO & SO
+  for (const poGroup of poSummaries) {
+    const wsCont = buildContainerPoSoWorksheet(poGroup, allocationMode);
+    XLSX.utils.book_append_sheet(wb, wsCont, poGroup.sheetNameExcel);
+  }
+
+  const safeDate = new Date().toISOString().slice(0, 10);
+  XLSX.writeFile(wb, `Bao_Cao_Tung_Cont_PO_SO_${safeDate}.xlsx`);
+}
+
+export function exportSingleContainerPoSoToExcel(
+  poGroup: ReconciledPoSummary,
+  allocationMode: string
+) {
+  const wb = XLSX.utils.book_new();
+  const wsCont = buildContainerPoSoWorksheet(poGroup, allocationMode);
+  XLSX.utils.book_append_sheet(wb, wsCont, poGroup.sheetNameExcel);
+  XLSX.writeFile(wb, `Cont_${poGroup.sheetNameExcel}.xlsx`);
 }
 
 export function exportFullReconciliationToExcel(
@@ -341,8 +666,8 @@ export function exportFullReconciliationToExcel(
     [
       'Chế độ phân bổ tồn kho:',
       allocationMode === 'fifo'
-        ? 'Phân bổ lũy kế FIFO (Kho 60 -> Kho 01 theo thứ tự đơn/Lịch xuất)'
-        : 'Đối chiếu trực tiếp từng dòng đơn hàng với Tổng Tồn (Kho 01 + Kho 60)'
+        ? 'Phân bổ lũy kế FIFO (Kho 60 -> Kho 01 theo thứ tự Cont/Lịch xuất)'
+        : 'Tính riêng độc lập từng Cont (SO & PO) với Tổng Tồn (Kho 01 + Kho 60)'
     ],
     [],
     ['CHỈ SỐ KPI TỔNG HỢP', 'GIÁ TRỊ', 'GHI CHÚ ĐỐI SOÁT AGENT'],
@@ -378,9 +703,9 @@ export function exportFullReconciliationToExcel(
       `Trong đó ${reconciliation.metrics.partialStockLinesCount} dòng đủ 1 phần, ${reconciliation.metrics.zeroStockLinesCount} dòng tồn = 0`
     ],
     [
-      'Tổng Số PO / Đơn Hàng',
+      'Tổng Số Cont (PO & SO)',
       reconciliation.metrics.totalPos,
-      `Đủ 100%: ${reconciliation.metrics.fulfilledPosCount} PO | Thiếu hàng: ${reconciliation.metrics.shortagePosCount} PO`
+      `Đủ 100%: ${reconciliation.metrics.fulfilledPosCount} Cont | Thiếu hàng: ${reconciliation.metrics.shortagePosCount} Cont`
     ],
     ['Tổng Số Lượng Cần Xuất (Pcs)', reconciliation.metrics.totalRequiredQty, ''],
     ['Tổng Số Lượng Đáp Ứng Từ Kho 01+60 (Pcs)', reconciliation.metrics.totalAllocatedQty, ''],
@@ -388,13 +713,36 @@ export function exportFullReconciliationToExcel(
   ];
   const wsKpi = XLSX.utils.aoa_to_sheet(kpiRows);
   wsKpi['!cols'] = [{ wch: 42 }, { wch: 22 }, { wch: 52 }];
-  XLSX.utils.book_append_sheet(wb, wsKpi, '1_Tong_Hop_KPI');
+  XLSX.utils.book_append_sheet(wb, wsKpi, '01_Tong_Hop_KPI');
 
-  // Sheet 2: Đơn Đủ Hàng Xuất (Fulfilled Order Lines)
+  // Sheet 2: Tổng Hợp Theo Từng Cont (PO & SO)
+  const poData = reconciliation.poSummaries.map((p, idx) => ({
+    STT: idx + 1,
+    'Cont #': `Cont #${String(p.containerIndex).padStart(2, '0')}`,
+    'Số PO': p.po,
+    'Số SO': p.so || p.soList.join(', '),
+    'Sheet PO&SO': p.sheetNameExcel,
+    'Khách Hàng': p.customer,
+    'Ngày Xuất Dự Kiến': p.loadingDate,
+    'Tổng Số Mã': p.totalLines,
+    'Số Mã Đủ': p.fulfilledLinesCount,
+    'Số Mã Thiếu': p.shortageLinesCount,
+    'Tổng SL Cần Xuất': p.totalRequiredQty,
+    'Tổng SL Đáp Ứng': p.totalAllocatedQty,
+    'Tổng SL Thiếu': p.totalShortageQty,
+    'Chi Tiết Mã Thiếu & SL Thiếu':
+      p.shortageLines.length === 0
+        ? 'Đủ 100%'
+        : p.shortageLines.map((l) => `${l.itemCode} (-${l.shortageQty})`).join(', '),
+    'Trạng Thái Cont': p.status === 'FULFILLED' ? 'ĐỦ HÀNG XUẤT 100%' : 'THIẾU HÀNG'
+  }));
+  const wsPo = XLSX.utils.json_to_sheet(poData);
+  XLSX.utils.book_append_sheet(wb, wsPo, '02_Tong_Hop_Tung_Cont');
+
+  // Sheet 3: Đơn Đủ Hàng Xuất
   const fulfilledData = reconciliation.fulfilledLines.map((l, idx) => ({
     STT: idx + 1,
-    'Dòng Excel': l.rowNumber,
-    'Cont/Block': l.containerIndex || '',
+    'Cont #': `Cont #${String(l.containerIndex).padStart(2, '0')}`,
     'Khách Hàng': l.customer,
     SO: l.so,
     PO: l.po,
@@ -407,22 +755,16 @@ export function exportFullReconciliationToExcel(
     'Tồn Đầu Kho 01': l.wh01Initial,
     'Tồn Đầu Kho 60': l.wh60Initial,
     'Tổng Tồn Đầu (01+60)': l.totalStockInitial,
-    'Tồn Khả Dụng Trước Đơn': l.stockBeforeLine,
     'SL Phân Bổ (01+60)': l.allocatedTotal,
-    'Tồn Còn Lại Sau Đơn': l.stockAfterLine,
-    'Số Kiện (#pkg)': l.pkgs,
-    'Thể Tích (CBM)': Number(l.cbm.toFixed(3)),
-    'Thành Tiền (USD)': Number(l.totalAmount.toFixed(2)),
     'Trạng Thái': 'ĐỦ HÀNG XUẤT (100%)'
   }));
   const wsFulfilled = XLSX.utils.json_to_sheet(fulfilledData);
-  XLSX.utils.book_append_sheet(wb, wsFulfilled, '2_Don_Du_Hang_Xuat');
+  XLSX.utils.book_append_sheet(wb, wsFulfilled, '03_Don_Du_Hang_Xuat');
 
-  // Sheet 3: Đơn / Dòng Thiếu Hàng (Shortage Order Lines)
+  // Sheet 4: Đơn Thiếu Hàng
   const shortageData = reconciliation.shortageLines.map((l, idx) => ({
     STT: idx + 1,
-    'Dòng Excel': l.rowNumber,
-    'Cont/Block': l.containerIndex || '',
+    'Cont #': `Cont #${String(l.containerIndex).padStart(2, '0')}`,
     'Khách Hàng': l.customer,
     SO: l.so,
     PO: l.po,
@@ -434,85 +776,40 @@ export function exportFullReconciliationToExcel(
     'SL Cần Xuất (Qty)': l.qty,
     'Tồn Đầu Kho 01': l.wh01Initial,
     'Tồn Đầu Kho 60': l.wh60Initial,
-    'Tổng Tồn Đầu (01+60)': l.totalStockInitial,
-    'Tồn Khả Dụng Trước Đơn': l.stockBeforeLine,
+    'Tồn Khả Dụng (01+60)': l.stockBeforeLine,
     'SL Đáp Ứng Được': l.allocatedTotal,
     'SL THIẾU HỤT (Shortage)': l.shortageQty,
-    'Tỷ Lệ Đáp Ứng (%)': Number(l.fulfillmentRate.toFixed(1)),
     'Mức Độ Thiếu':
-      l.fulfillmentStatus === 'ZERO_STOCK' ? 'HẾT TỒN KHO 01+60 (0 Pcs)' : 'THIẾU MỘT PHẦN',
-    'Thành Tiền (USD)': Number(l.totalAmount.toFixed(2))
+      l.fulfillmentStatus === 'ZERO_STOCK' ? 'HẾT TỒN KHO 01+60 (0 Pcs)' : 'THIẾU MỘT PHẦN'
   }));
   const wsShortage = XLSX.utils.json_to_sheet(shortageData);
-  XLSX.utils.book_append_sheet(wb, wsShortage, '3_Don_Hang_Thieu');
-
-  // Sheet 4: Tổng Hợp Theo PO / Container
-  const poData = reconciliation.poSummaries.map((p, idx) => ({
-    STT: idx + 1,
-    'Số PO': p.po,
-    'Số SO': p.soList.join(', '),
-    'Khách Hàng': p.customer,
-    'Ngày Xuất Dự Kiến': p.loadingDate,
-    'Tổng Số Dòng': p.totalLines,
-    'Dòng Đủ Hàng': p.fulfilledLinesCount,
-    'Dòng Thiếu Hàng': p.shortageLinesCount,
-    'Tổng SL Cần Xuất': p.totalRequiredQty,
-    'Tổng SL Đáp Ứng': p.totalAllocatedQty,
-    'Tổng SL Thiếu': p.totalShortageQty,
-    'Tỷ Lệ Đáp Ứng (%)': Number(p.fulfillmentRate.toFixed(1)),
-    'Tổng Số Kiện (#pkg)': p.totalPkgs,
-    'Tổng CBM': Number(p.totalCbm.toFixed(2)),
-    'Tổng Giá Trị (USD)': Number(p.totalAmount.toFixed(2)),
-    'Trạng Thái PO': p.status === 'FULFILLED' ? 'ĐỦ HÀNG XUẤT 100%' : 'THIẾU HÀNG'
-  }));
-  const wsPo = XLSX.utils.json_to_sheet(poData);
-  XLSX.utils.book_append_sheet(wb, wsPo, '4_Theo_PO_Container');
+  XLSX.utils.book_append_sheet(wb, wsShortage, '04_Don_Hang_Thieu');
 
   // Sheet 5: Báo Cáo Tồn Kho Thành Phẩm Trái/Phải (Kho 01 & 60)
   const lrData = lrPairs.map((p, idx) => ({
     STT: idx + 1,
     'Model / Feature': p.model,
-    'Nhóm Hàng': p.isFinishedGood ? 'Thành Phẩm (Đầu 8)' : 'Bán Thành Phẩm / Phụ Kiện',
     'Mô Tả': p.description,
-    'Mã Trái (LHF / Left)': p.leftCode,
+    'Mã Trái (LHF)': p.leftCode,
     'Trái - Kho 01': p.leftWh01,
     'Trái - Kho 60': p.leftWh60,
     'Tổng Trái (01+60)': p.leftTotal,
-    'Mã Phải (RHF / Right)': p.rightCode,
+    'Mã Phải (RHF)': p.rightCode,
     'Phải - Kho 01': p.rightWh01,
     'Phải - Kho 60': p.rightWh60,
     'Tổng Phải (01+60)': p.rightTotal,
-    'Tổng Tồn Cặp (Trái+Phải)': p.combinedTotal,
-    'Số Bộ Ghép Đôi Hoàn Chỉnh (Sets)': p.matchedSets,
-    'Chênh Lệch (Trái - Phải)': p.diffLR,
-    'Trạng Thái Cặp': p.isBalanced
-      ? p.hasWarehouseCrossBalance
-        ? 'CÂN BẰNG KHI GỘP KHO 01+60'
-        : 'CÂN BẰNG 100%'
-      : `LỆCH CẶP (${p.diffLR > 0 ? '+' + p.diffLR + ' Trái' : p.diffLR + ' Phải'})`
+    'Số Bộ Ghép Đôi (Sets)': p.matchedSets,
+    'Chênh Lệch (Trái - Phải)': p.diffLR
   }));
   const wsLr = XLSX.utils.json_to_sheet(lrData);
-  XLSX.utils.book_append_sheet(wb, wsLr, '5_Ton_Kho_Trai_Phai_01_60');
+  XLSX.utils.book_append_sheet(wb, wsLr, '05_Ton_Kho_Trai_Phai');
 
-  // Sheet 6: Toàn Bộ 220 Mã Tồn Kho 01 & 60
-  const allStockData = stockItems.map((s, idx) => ({
-    STT: idx + 1,
-    'Mã Hàng (Stock Code)': s.code,
-    'Model / Feature': s.feature,
-    'Phân Loại Bên': s.side === 'L' ? 'Trái (LHF)' : s.side === 'R' ? 'Phải (RHF)' : 'Chung',
-    'Nhóm Hàng': s.category,
-    'Mô Tả': s.description,
-    'Tồn Kho 01': s.wh01Qty,
-    'Tồn Kho 60': s.wh60Qty,
-    'Tổng Tồn (01 + 60)': s.totalQty,
-    'Số Lô Batch (Kho 01)': s.batches01,
-    'Số Lô Batch (Kho 60)': s.batches60,
-    'Vị Trí BIN': s.bins.join(', '),
-    'Ngày Nhập Mới Nhất': s.latestDate
-  }));
-  const wsStock = XLSX.utils.json_to_sheet(allStockData);
-  XLSX.utils.book_append_sheet(wb, wsStock, '6_Chi_Tiet_Ton_Kho_01_60');
+  // Append individual sheets for each Container (PO & SO) right into the workbook as well!
+  for (const poGroup of reconciliation.poSummaries) {
+    const wsCont = buildContainerPoSoWorksheet(poGroup, allocationMode);
+    XLSX.utils.book_append_sheet(wb, wsCont, poGroup.sheetNameExcel);
+  }
 
   const safeDate = new Date().toISOString().slice(0, 10);
-  XLSX.writeFile(wb, `Bao_Cao_Xuat_Cont_Ton_Kho_01_60_${safeDate}.xlsx`);
+  XLSX.writeFile(wb, `Bao_Cao_Xuat_Cont_PO_SO_Kho_01_60_${safeDate}.xlsx`);
 }

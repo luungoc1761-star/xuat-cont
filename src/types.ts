@@ -175,11 +175,15 @@ export interface ReconciledOrderLine extends ShipmentLine {
 }
 
 export interface ReconciledPoSummary {
+  id: string;
   po: string;
+  so: string;
   soList: string[];
   customer: string;
+  pkl: string;
   loadingDate: string;
   containerIndex: number;
+  sheetNameExcel: string;
   totalLines: number;
   fulfilledLinesCount: number;
   shortageLinesCount: number;
@@ -192,6 +196,7 @@ export interface ReconciledPoSummary {
   fulfillmentRate: number;
   status: 'FULFILLED' | 'SHORTAGE';
   lines: ReconciledOrderLine[];
+  shortageLines: ReconciledOrderLine[];
 }
 
 export interface ReconciledItemDemand {

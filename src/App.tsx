@@ -26,7 +26,8 @@ import {
 import {
   parseStockWorkbook,
   parseShipmentWorkbook,
-  exportFullReconciliationToExcel
+  exportFullReconciliationToExcel,
+  exportContainersByPoSoToExcel
 } from './utils/excelParserAndExporter';
 import { KpiCardsSection } from './components/KpiCardsSection';
 import { MultiAgentAuditPanel } from './components/MultiAgentAuditPanel';
@@ -41,7 +42,7 @@ export function App() {
   const [lrPairs, setLrPairs] = useState<LeftRightPair[]>([]);
   const [plans, setPlans] = useState<Record<string, PlanDataset>>({});
   const [activePlanKey, setActivePlanKey] = useState<string>('NOV-full');
-  const [allocationMode, setAllocationMode] = useState<AllocationMode>('fifo');
+  const [allocationMode, setAllocationMode] = useState<AllocationMode>('direct');
 
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [filterMode3D, setFilterMode3D] = useState<
@@ -50,8 +51,8 @@ export function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCodes, setSelectedCodes] = useState<string[]>([]);
   const [reportTab, setReportTab] = useState<
-    'split' | 'fulfilled' | 'shortage' | 'po' | 'items'
-  >('split');
+    'po' | 'split' | 'fulfilled' | 'shortage' | 'items'
+  >('po');
 
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [lastVerifiedAt, setLastVerifiedAt] = useState<string>('');
@@ -437,6 +438,22 @@ export function App() {
               </button>
             </div>
 
+            {/* Export Excel Per Container (Each Sheet = PO&SO) Button */}
+            <button
+              onClick={() =>
+                exportContainersByPoSoToExcel(
+                  reconciliation.poSummaries,
+                  activePlan.name,
+                  allocationMode
+                )
+              }
+              className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-amber-400 to-orange-500 px-3.5 py-2 text-xs font-extrabold text-slate-950 shadow-lg shadow-amber-500/20 hover:brightness-110 transition cursor-pointer"
+              title="Xuất file Excel riêng theo từng Cont, trong đó mỗi Sheet đặt tên theo PO & SO của Cont đó"
+            >
+              <Download className="h-4 w-4" />
+              <span>Xuất Excel Từng Cont (Sheet PO&SO)</span>
+            </button>
+
             {/* Export Excel Primary Button */}
             <button
               onClick={() =>
@@ -451,7 +468,7 @@ export function App() {
               className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 px-3.5 py-2 text-xs font-extrabold text-slate-950 shadow-lg shadow-emerald-500/20 hover:brightness-110 transition cursor-pointer"
             >
               <Download className="h-4 w-4" />
-              <span>Xuất Excel (.xlsx)</span>
+              <span>Xuất Excel Tổng Hợp</span>
             </button>
           </div>
         </div>
