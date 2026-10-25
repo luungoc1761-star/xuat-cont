@@ -498,6 +498,11 @@ def build_dataset():
     with open(out_file, 'w', encoding='utf-8') as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
 
+    root_data_dir = os.path.join(ROOT_DIR, 'data')
+    os.makedirs(root_data_dir, exist_ok=True)
+    with open(os.path.join(root_data_dir, 'initial-data.json'), 'w', encoding='utf-8') as f:
+        json.dump(output, f, ensure_ascii=False, indent=2)
+
     files_dir = os.path.join(ROOT_DIR, 'public', 'files')
     os.makedirs(files_dir, exist_ok=True)
     shutil.copy2(stock_path, os.path.join(files_dir, 'Stock list.xlsx'))

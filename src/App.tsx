@@ -74,7 +74,7 @@ export function App() {
   // Load initial verified dataset
   const loadInitialDataset = async () => {
     try {
-      const res = await fetch(`/data/initial-data.json?t=${Date.now()}`);
+      const res = await fetch(`./data/initial-data.json?t=${Date.now()}`);
       const payload: InitialDataPayload = await res.json();
       setStockItems(payload.stockItems);
       setLrPairs(payload.lrPairs);

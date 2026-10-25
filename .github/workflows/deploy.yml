@@ -1,0 +1,45 @@
+name: Auto Sync Excel Data & Update GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Stock list.xlsx'
+      - 'NOV. SHIPMENT -OCT22.xlsx'
+      - 'src/**'
+      - 'scripts/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build-and-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild verified dataset & production bundle
+        run: node scripts/deploy_pages.mjs
+
+      - name: Commit updated data & bundle to main if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add index.html assets/ data/initial-data.json public/data/initial-data.json .nojekyll
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(deploy): auto-rebuild 3D dashboard & data from latest Excel files [skip ci]"
+            git push origin main
+          fi

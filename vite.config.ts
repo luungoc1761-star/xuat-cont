@@ -140,6 +140,7 @@ function realtimeRepoSyncPlugin() {
 }
 
 export default defineConfig({
+  base: './',
   plugins: [react(), tailwindcss(), realtimeRepoSyncPlugin()],
   build: {
     target: 'esnext',
