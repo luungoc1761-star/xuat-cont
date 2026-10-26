@@ -154,12 +154,28 @@ def build_dataset():
         'batchList': []
     })
 
+    def is_accessory_model(feat):
+        f = str(feat or '').strip().lower()
+        return (
+            f in ('accessories', 'accessory', 'phụ kiện', 'phu kien')
+            or 'access' in f
+            or 'phụ kiện' in f
+            or 'phu kien' in f
+        )
+
     for r in stock_rows:
         wh = str(r.get('B') or '').strip()
         code = str(r.get('A') or '').strip()
         qty = safe_float(r.get('F'), 0.0)
         if not code:
             continue
+
+        # Ở kho 01 nếu mã hàng đầu 3* có model là phụ kiện thì mới lấy, còn không sẽ bỏ qua
+        if wh == '01' and code.startswith('3'):
+            code_feat = item_meta.get(code, {}).get('feature', '')
+            if not is_accessory_model(code_feat):
+                continue
+
         wh_summary[wh]['rows'] += 1
         wh_summary[wh]['qty'] += qty
         wh_summary[wh]['codes'].add(code)
@@ -184,14 +200,13 @@ def build_dataset():
             entry['bins'].add(bin_code)
         if cdate and cdate > entry['latestDate']:
             entry['latestDate'] = cdate
-        if len(entry['batchList']) < 15:
-            entry['batchList'].append({
-                'wh': wh,
-                'batch': batch_no,
-                'bin': bin_code,
-                'date': cdate,
-                'qty': qty
-            })
+        entry['batchList'].append({
+            'wh': wh,
+            'batch': batch_no,
+            'bin': bin_code,
+            'date': cdate,
+            'qty': qty
+        })
 
     # Format stock items list
     stock_items = []
@@ -206,6 +221,7 @@ def build_dataset():
         side = detect_side(code, desc)
         category = 'Finished Goods (Thành Phẩm Đầu 8)' if is_fg else (
             'Side Assembly (Bán Thành Phẩm)' if code.startswith('1220') else
+            'Hardware & Accessories (Phụ Kiện)' if is_accessory_model(feat) else
             'Stamp Part (Linh Kiện Dập 34/38/39)' if code.startswith(('34', '36', '38', '39')) else
             'Hardware & Accessories (Phụ Kiện)'
         )

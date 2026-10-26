@@ -12,6 +12,7 @@ import {
   ArrowUpRight
 } from 'lucide-react';
 import { StockItem, LeftRightPair, ReconciledItemDemand } from '../types';
+import { isAccessoryModel } from '../utils/reconciliationEngine';
 
 interface QuickFillStockSearchProps {
   stockItems: StockItem[];
@@ -108,6 +109,26 @@ export const QuickFillStockSearch: React.FC<QuickFillStockSearchProps> = ({
     }
   };
 
+  // Quy tắc: Ở kho 01 nếu đầu 3* có model là phụ kiện thì mới lấy còn không sẽ bỏ qua
+  const validStockItems = useMemo(() => {
+    return stockItems.filter((item) => {
+      if (item.code.startsWith('3') && item.wh01Qty > 0 && !isAccessoryModel(item.feature, item.category)) {
+        return item.wh60Qty > 0;
+      }
+      return true;
+    });
+  }, [stockItems]);
+
+  const whCounts = useMemo(() => {
+    return {
+      all: validStockItems.length,
+      fg: validStockItems.filter((s) => s.isFinishedGood).length,
+      wh01: validStockItems.filter((s) => s.wh01Qty > 0).length,
+      wh60: validStockItems.filter((s) => s.wh60Qty > 0).length,
+      both: validStockItems.filter((s) => s.wh01Qty > 0 && s.wh60Qty > 0).length
+    };
+  }, [validStockItems]);
+
   // Filtered Stock Items
   const filteredStock = useMemo(() => {
     const tokens = searchQuery
@@ -115,7 +136,7 @@ export const QuickFillStockSearch: React.FC<QuickFillStockSearchProps> = ({
       .map((t) => t.trim().toLowerCase())
       .filter(Boolean);
 
-    return stockItems.filter((item) => {
+    return validStockItems.filter((item) => {
       if (whFilter === '01' && item.wh01Qty <= 0) return false;
       if (whFilter === '60' && item.wh60Qty <= 0) return false;
       if (whFilter === 'BOTH' && (item.wh01Qty <= 0 || item.wh60Qty <= 0)) return false;
@@ -130,7 +151,7 @@ export const QuickFillStockSearch: React.FC<QuickFillStockSearchProps> = ({
       const hay = `${item.code} ${item.feature} ${item.description} ${item.category}`.toLowerCase();
       return tokens.some((tk) => hay.includes(tk));
     });
-  }, [stockItems, searchQuery, selectedCodes, whFilter]);
+  }, [validStockItems, searchQuery, selectedCodes, whFilter]);
 
   const handleBatchApply = () => {
     const tokens = batchText
@@ -159,7 +180,7 @@ export const QuickFillStockSearch: React.FC<QuickFillStockSearchProps> = ({
             <h2 className="text-base font-bold text-white flex items-center gap-2">
               Điền Nhanh & Tra Cứu Tức Thì Mã Hàng Trong Stock Tồn Kho (Kho 01 & 60)
               <span className="rounded-full bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 text-[11px] font-mono text-amber-300">
-                {filteredStock.length} / {stockItems.length} mã
+                {filteredStock.length} / {validStockItems.length} mã
               </span>
             </h2>
             <p className="text-xs text-slate-400">
@@ -218,11 +239,11 @@ export const QuickFillStockSearch: React.FC<QuickFillStockSearchProps> = ({
         {/* Warehouse Scope Filter Buttons */}
         <div className="flex flex-wrap items-center gap-1.5">
           {[
-            { id: 'ALL', label: 'Tất Cả (220)' },
-            { id: 'FG', label: 'Thành Phẩm Đầu 8 (101)' },
-            { id: '01', label: 'Có Ở Kho 01 (140)' },
-            { id: '60', label: 'Có Ở Kho 60 (100)' },
-            { id: 'BOTH', label: 'Cả 2 Kho 01 & 60 (20)' }
+            { id: 'ALL', label: `Tất Cả (${whCounts.all})` },
+            { id: 'FG', label: `Thành Phẩm Đầu 8 (${whCounts.fg})` },
+            { id: '01', label: `Có Ở Kho 01 (${whCounts.wh01})` },
+            { id: '60', label: `Có Ở Kho 60 (${whCounts.wh60})` },
+            { id: 'BOTH', label: `Cả 2 Kho 01 & 60 (${whCounts.both})` }
           ].map((b) => (
             <button
               key={b.id}

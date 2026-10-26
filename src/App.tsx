@@ -17,11 +17,14 @@ import {
   InitialDataPayload,
   LeftRightPair,
   PlanDataset,
+  ReconciledPoSummary,
   StockItem
 } from './types';
 import {
   reconcileShipmentPlan,
-  buildLrPairsFromStock
+  buildLrPairsFromStock,
+  deductShippedContainerFromStock,
+  isAccessoryModel
 } from './utils/reconciliationEngine';
 import {
   parseStockWorkbook,
@@ -59,6 +62,18 @@ export function App() {
   const [lastSyncLog, setLastSyncLog] = useState<string>(
     'Đã tải và đối soát chuẩn xác Stock list.xlsx (Kho 01 & 60) + NOV. SHIPMENT -OCT22.xlsx trên Repo'
   );
+  const [exportedHistory, setExportedHistory] = useState<
+    Array<{
+      contLabel: string;
+      po: string;
+      so: string;
+      deductedQty: number;
+      timestamp: string;
+      prevStockItems: StockItem[];
+      prevLrPairs: LeftRightPair[];
+      prevPlans: Record<string, PlanDataset>;
+    }>
+  >([]);
 
   // Quick inline file inputs in header
   const quickStockInputRef = useRef<HTMLInputElement | null>(null);
@@ -77,8 +92,14 @@ export function App() {
     try {
       const res = await fetch(`./data/initial-data.json?t=${Date.now()}`);
       const payload: InitialDataPayload = await res.json();
-      setStockItems(payload.stockItems);
-      setLrPairs(payload.lrPairs);
+      const filteredStock = payload.stockItems.filter((item) => {
+        if (item.code.startsWith('3') && item.wh01Qty > 0 && !isAccessoryModel(item.feature, item.category)) {
+          return item.wh60Qty > 0;
+        }
+        return true;
+      });
+      setStockItems(filteredStock);
+      setLrPairs(buildLrPairsFromStock(filteredStock));
       setPlans(payload.plans);
       if (!payload.plans[activePlanKey]) {
         const firstKey = Object.keys(payload.plans)[0] || 'NOV-full';
@@ -96,8 +117,9 @@ export function App() {
     loadInitialDataset();
 
     // Listen to Vite HMR custom event when repo Excel files change externally / via OneDrive watcher
-    if (import.meta.hot) {
-      import.meta.hot.on('repo-data-updated', (data: any) => {
+    const metaHot = (import.meta as any).hot;
+    if (metaHot) {
+      metaHot.on('repo-data-updated', (data: any) => {
         loadInitialDataset();
         setLastSyncLog(
           `[Realtime Auto-Sync] Phát hiện thay đổi file ${data?.file || 'Stock list.xlsx'} -> Đã tự động cập nhật lúc ${new Date().toLocaleTimeString('vi-VN')}`
@@ -149,6 +171,67 @@ export function App() {
   const reconciliation = useMemo(() => {
     return reconcileShipmentPlan(stockItems, activePlan.lines, allocationMode);
   }, [stockItems, activePlan, allocationMode]);
+
+  // Handler when clicking "Xuất Cont" on any container card:
+  // 1. Deducts reconciled inventory from warehouse stock (Kho 60 & Kho 01)
+  // 2. Carries cumulative deduction forward for all subsequent orders in the plan
+  // 3. Removes the completed container from the active shipment plan
+  const handleExportContainer = (poGroup: ReconciledPoSummary) => {
+    const contLabel = `Cont #${String(poGroup.containerIndex).padStart(2, '0')}`;
+    const lineIdsToRemove = new Set(poGroup.lines.map((l) => l.id));
+    const deductedQty = poGroup.totalAllocatedQty;
+
+    const nextStockItems = deductShippedContainerFromStock(stockItems, poGroup);
+    const nextLrPairs = buildLrPairsFromStock(nextStockItems);
+
+    const nextPlans: Record<string, PlanDataset> = { ...plans };
+    const currentPlan = nextPlans[activePlanKey];
+    if (currentPlan) {
+      const remainingLines = currentPlan.lines.filter((l) => !lineIdsToRemove.has(l.id));
+      const remainingContIndices = new Set(remainingLines.map((l) => l.containerIndex));
+      const remainingContainers = currentPlan.containers.filter((c) =>
+        remainingContIndices.has(c.containerIndex)
+      );
+      nextPlans[activePlanKey] = {
+        ...currentPlan,
+        lines: remainingLines,
+        containers: remainingContainers
+      };
+    }
+
+    setExportedHistory((prev) => [
+      ...prev,
+      {
+        contLabel,
+        po: poGroup.po,
+        so: poGroup.so || poGroup.soList.join(', ') || 'N/A',
+        deductedQty,
+        timestamp: new Date().toLocaleTimeString('vi-VN'),
+        prevStockItems: stockItems,
+        prevLrPairs: lrPairs,
+        prevPlans: plans
+      }
+    ]);
+
+    setStockItems(nextStockItems);
+    setLrPairs(nextLrPairs);
+    setPlans(nextPlans);
+    setLastVerifiedAt(new Date().toLocaleTimeString('vi-VN'));
+    setLastSyncLog(
+      `Đã hoàn thành xuất ${contLabel} (PO: ${poGroup.po} | SO: ${poGroup.so || 'N/A'}): Đã trừ -${deductedQty.toLocaleString('en-US')} pcs khỏi hệ thống tồn kho (lũy kế cho các đơn tiếp theo) và đưa đơn ra khỏi kế hoạch xuất.`
+    );
+  };
+
+  const handleUndoLastExportContainer = () => {
+    if (exportedHistory.length === 0) return;
+    const last = exportedHistory[exportedHistory.length - 1];
+    setStockItems(last.prevStockItems);
+    setLrPairs(last.prevLrPairs);
+    setPlans(last.prevPlans);
+    setExportedHistory((prev) => prev.slice(0, -1));
+    setLastVerifiedAt(new Date().toLocaleTimeString('vi-VN'));
+    setLastSyncLog(`Đã hoàn tác xuất ${last.contLabel} (PO: ${last.po}) và khôi phục tồn kho.`);
+  };
 
   // Helper to convert ArrayBuffer to base64 and sync with backend repo API
   const syncBufferToBackendRepo = async (
@@ -538,6 +621,9 @@ export function App() {
           selectedModel={selectedModel}
           activeTab={reportTab}
           setActiveTab={setReportTab}
+          onExportContainer={handleExportContainer}
+          exportedContainersLog={exportedHistory}
+          onUndoLastExportContainer={handleUndoLastExportContainer}
         />
       </main>
 

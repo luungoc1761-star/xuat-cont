@@ -72,18 +72,204 @@ function buildSafeExcelSheetName(
   return finalName;
 }
 
+export function isAccessoryModel(feature?: string, category?: string): boolean {
+  const f = (feature || '').trim().toLowerCase();
+  const c = (category || '').trim().toLowerCase();
+  return (
+    f === 'accessories' ||
+    f === 'accessory' ||
+    f.includes('access') ||
+    f.includes('phụ kiện') ||
+    f.includes('phu kien') ||
+    c.includes('accessories') ||
+    c.includes('phụ kiện')
+  );
+}
+
+function summarizeBinsForStockItem(s?: StockItem): {
+  bins: string[];
+  wh60BinsMap: Array<{ bin: string; qty: number }>;
+  wh01BinsMap: Array<{ bin: string; qty: number }>;
+  wh60BinsText: string;
+  wh01BinsText: string;
+  allBinsText: string;
+} {
+  if (!s || s.totalQty <= 0) {
+    return {
+      bins: [],
+      wh60BinsMap: [],
+      wh01BinsMap: [],
+      wh60BinsText: '',
+      wh01BinsText: '',
+      allBinsText: 'Hết tồn (Không có Bin)'
+    };
+  }
+
+  const map60 = new Map<string, number>();
+  const map01 = new Map<string, number>();
+
+  for (const b of s.batchList || []) {
+    if (b.qty <= 0) continue;
+    const binLabel = (b.bin || '').trim() || 'Chưa gán Bin';
+    if (b.wh === '60') {
+      map60.set(binLabel, (map60.get(binLabel) || 0) + b.qty);
+    } else if (b.wh === '01') {
+      map01.set(binLabel, (map01.get(binLabel) || 0) + b.qty);
+    }
+  }
+
+  const wh60BinsMap = Array.from(map60.entries()).map(([bin, qty]) => ({ bin, qty }));
+  const wh01BinsMap = Array.from(map01.entries()).map(([bin, qty]) => ({ bin, qty }));
+
+  const wh60BinsText = wh60BinsMap.map((x) => `${x.bin} (${x.qty})`).join(', ');
+  const wh01BinsText = wh01BinsMap.map((x) => `${x.bin} (${x.qty})`).join(', ');
+
+  const parts: string[] = [];
+  if (wh60BinsText) parts.push(`[Kho 60] ${wh60BinsText}`);
+  if (wh01BinsText) parts.push(`[Kho 01] ${wh01BinsText}`);
+  if (parts.length === 0 && s.bins?.length) {
+    parts.push(s.bins.join(', '));
+  }
+
+  return {
+    bins: s.bins || [],
+    wh60BinsMap,
+    wh01BinsMap,
+    wh60BinsText,
+    wh01BinsText,
+    allBinsText: parts.join(' | ') || 'Chưa gán vị trí Bin'
+  };
+}
+
+function buildPickingBinsSuggestion(
+  binSummary: ReturnType<typeof summarizeBinsForStockItem>,
+  alloc60: number,
+  alloc01: number
+): string {
+  if (alloc60 <= 0 && alloc01 <= 0) {
+    return 'Hết tồn kho (Không có Bin lấy hàng)';
+  }
+  const pickParts: string[] = [];
+
+  if (alloc60 > 0) {
+    let rem = alloc60;
+    const picked60: string[] = [];
+    for (const entry of binSummary.wh60BinsMap) {
+      if (rem <= 0) break;
+      const take = Math.min(entry.qty, rem);
+      if (take > 0) {
+        picked60.push(`${entry.bin} (${take})`);
+        rem -= take;
+      }
+    }
+    if (picked60.length > 0) {
+      pickParts.push(`Kho 60: ${picked60.join(', ')}`);
+    } else if (binSummary.bins.length > 0) {
+      pickParts.push(`Kho 60 (${alloc60} pcs): ${binSummary.bins.join(', ')}`);
+    } else {
+      pickParts.push(`Kho 60: ${alloc60} pcs`);
+    }
+  }
+
+  if (alloc01 > 0) {
+    let rem = alloc01;
+    const picked01: string[] = [];
+    for (const entry of binSummary.wh01BinsMap) {
+      if (rem <= 0) break;
+      const take = Math.min(entry.qty, rem);
+      if (take > 0) {
+        picked01.push(`${entry.bin} (${take})`);
+        rem -= take;
+      }
+    }
+    if (picked01.length > 0) {
+      pickParts.push(`Kho 01: ${picked01.join(', ')}`);
+    } else if (binSummary.bins.length > 0) {
+      pickParts.push(`Kho 01 (${alloc01} pcs): ${binSummary.bins.join(', ')}`);
+    } else {
+      pickParts.push(`Kho 01: ${alloc01} pcs`);
+    }
+  }
+
+  return pickParts.join(' | ');
+}
+
+export function deductShippedContainerFromStock(
+  stockItems: StockItem[],
+  shippedGroup: ReconciledPoSummary
+): StockItem[] {
+  const nextItems: StockItem[] = stockItems.map((s) => ({
+    ...s,
+    bins: [...(s.bins || [])],
+    batchList: (s.batchList || []).map((b) => ({ ...b }))
+  }));
+
+  const byCode = new Map<string, StockItem>();
+  for (const s of nextItems) {
+    byCode.set(s.code.trim(), s);
+  }
+
+  for (const line of shippedGroup.lines) {
+    const code = line.itemCode.trim();
+    const item = byCode.get(code);
+    if (!item) continue;
+
+    const reqQty = line.qty;
+    const deduct60 = Math.min(item.wh60Qty, reqQty);
+    const remAfter60 = reqQty - deduct60;
+    const deduct01 = Math.min(item.wh01Qty, remAfter60);
+
+    item.wh60Qty = Math.max(0, item.wh60Qty - deduct60);
+    item.wh01Qty = Math.max(0, item.wh01Qty - deduct01);
+    item.totalQty = item.wh60Qty + item.wh01Qty;
+
+    // Deduct FIFO from batches in WH 60
+    let remBatch60 = deduct60;
+    for (const b of item.batchList) {
+      if (b.wh === '60' && b.qty > 0 && remBatch60 > 0) {
+        const take = Math.min(b.qty, remBatch60);
+        b.qty -= take;
+        remBatch60 -= take;
+      }
+    }
+
+    // Deduct FIFO from batches in WH 01
+    let remBatch01 = deduct01;
+    for (const b of item.batchList) {
+      if (b.wh === '01' && b.qty > 0 && remBatch01 > 0) {
+        const take = Math.min(b.qty, remBatch01);
+        b.qty -= take;
+        remBatch01 -= take;
+      }
+    }
+
+    item.batchList = item.batchList.filter((b) => b.qty > 0);
+    item.batches60 = item.batchList.filter((b) => b.wh === '60').length;
+    item.batches01 = item.batchList.filter((b) => b.wh === '01').length;
+    item.bins = Array.from(
+      new Set(item.batchList.map((b) => (b.bin || '').trim()).filter(Boolean))
+    ).sort();
+  }
+
+  return nextItems;
+}
+
 export function reconcileShipmentPlan(
   stockItems: StockItem[],
   planLines: ShipmentLine[],
   mode: AllocationMode
 ): ReconciliationResult {
-  const stockMap = new Map<string, { wh01: number; wh60: number; total: number }>();
+  const stockMap = new Map<string, { wh01: number; wh60: number; total: number; item: StockItem }>();
+  const binSummaryMap = new Map<string, ReturnType<typeof summarizeBinsForStockItem>>();
   for (const s of stockItems) {
-    stockMap.set(s.code.trim(), {
+    const c = s.code.trim();
+    stockMap.set(c, {
       wh01: s.wh01Qty,
       wh60: s.wh60Qty,
-      total: s.totalQty
+      total: s.totalQty,
+      item: s
     });
+    binSummaryMap.set(c, summarizeBinsForStockItem(s));
   }
 
   // Global remaining inventory for FIFO cumulative mode across containers
@@ -161,6 +347,9 @@ export function reconcileShipmentPlan(
         fulfillmentStatus = allocatedTotal > 0 ? 'PARTIAL_SHORTAGE' : 'ZERO_STOCK';
       }
 
+      const binInfo = binSummaryMap.get(code) || summarizeBinsForStockItem(undefined);
+      const pickingBinsText = buildPickingBinsSuggestion(binInfo, alloc60, alloc01);
+
       const recLine: ReconciledOrderLine = {
         ...line,
         wh01Initial: init.wh01,
@@ -175,7 +364,12 @@ export function reconcileShipmentPlan(
         fulfillmentRate,
         fulfillmentStatus,
         directStatus,
-        directShortageQty
+        directShortageQty,
+        bins: binInfo.bins,
+        wh01BinsText: binInfo.wh01BinsText,
+        wh60BinsText: binInfo.wh60BinsText,
+        pickingBinsText,
+        allBinsText: binInfo.allBinsText
       };
 
       reconciledLines.push(recLine);
@@ -245,6 +439,8 @@ export function reconcileShipmentPlan(
     const short = Math.max(0, totalReq - init.total);
     const surplus = Math.max(0, init.total - totalReq);
 
+    const binInfo = binSummaryMap.get(code) || summarizeBinsForStockItem(undefined);
+
     itemDemands.push({
       itemCode: code,
       feature: first.feature,
@@ -260,7 +456,9 @@ export function reconcileShipmentPlan(
       allocatedQty: alloc,
       shortageQty: short,
       surplusQty: surplus,
-      status: short === 0 ? 'ENOUGH' : 'SHORTAGE'
+      status: short === 0 ? 'ENOUGH' : 'SHORTAGE',
+      bins: binInfo.bins,
+      allBinsText: binInfo.allBinsText
     });
   }
 

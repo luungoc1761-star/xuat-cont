@@ -172,6 +172,11 @@ export interface ReconciledOrderLine extends ShipmentLine {
   fulfillmentStatus: 'FULFILLED' | 'PARTIAL_SHORTAGE' | 'ZERO_STOCK';
   directStatus: 'FULFILLED' | 'SHORTAGE';
   directShortageQty: number;
+  bins?: string[];
+  wh01BinsText?: string;
+  wh60BinsText?: string;
+  pickingBinsText?: string;
+  allBinsText?: string;
 }
 
 export interface ReconciledPoSummary {
@@ -215,4 +220,6 @@ export interface ReconciledItemDemand {
   shortageQty: number;
   surplusQty: number;
   status: 'ENOUGH' | 'SHORTAGE';
+  bins?: string[];
+  allBinsText?: string;
 }

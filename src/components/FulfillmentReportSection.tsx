@@ -11,7 +11,13 @@ import {
   Ship,
   Columns
 } from 'lucide-react';
-import { AllocationMode, LeftRightPair, ReconciledOrderLine, StockItem } from '../types';
+import {
+  AllocationMode,
+  LeftRightPair,
+  ReconciledOrderLine,
+  ReconciledPoSummary,
+  StockItem
+} from '../types';
 import { ReconciliationResult } from '../utils/reconciliationEngine';
 import {
   exportFullReconciliationToExcel,
@@ -31,6 +37,15 @@ interface FulfillmentReportSectionProps {
   selectedModel: string | null;
   activeTab: 'po' | 'split' | 'fulfilled' | 'shortage' | 'items';
   setActiveTab: (t: 'po' | 'split' | 'fulfilled' | 'shortage' | 'items') => void;
+  onExportContainer?: (poGroup: ReconciledPoSummary) => void;
+  exportedContainersLog?: Array<{
+    contLabel: string;
+    po: string;
+    so: string;
+    deductedQty: number;
+    timestamp: string;
+  }>;
+  onUndoLastExportContainer?: () => void;
 }
 
 export const FulfillmentReportSection: React.FC<FulfillmentReportSectionProps> = ({
@@ -43,7 +58,10 @@ export const FulfillmentReportSection: React.FC<FulfillmentReportSectionProps> =
   searchQuery,
   selectedModel,
   activeTab,
-  setActiveTab
+  setActiveTab,
+  onExportContainer,
+  exportedContainersLog = [],
+  onUndoLastExportContainer
 }) => {
   const [customerFilter, setCustomerFilter] = useState<string>('ALL');
   const [poFilter, setPoFilter] = useState<string>('ALL');
@@ -350,6 +368,33 @@ export const FulfillmentReportSection: React.FC<FulfillmentReportSectionProps> =
             </div>
           </div>
 
+          {exportedContainersLog.length > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-500/40 bg-emerald-950/30 px-4 py-2.5 text-xs">
+              <div className="flex flex-wrap items-center gap-2 text-emerald-200">
+                <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+                <span>
+                  Đã hoàn thành xuất <strong className="text-white">{exportedContainersLog.length} Cont</strong> (Đã trừ tồn kho đối soát lũy kế cho các đơn tiếp theo & đưa khỏi kế hoạch xuất):{' '}
+                  {exportedContainersLog.map((c, i) => (
+                    <span
+                      key={`${c.contLabel}-${c.po}-${i}`}
+                      className="inline-flex items-center gap-1 rounded bg-emerald-500/20 border border-emerald-500/30 px-2 py-0.5 font-mono text-[11px] text-emerald-300 mr-1.5"
+                    >
+                      {c.contLabel} (PO: {c.po} | -{c.deductedQty.toLocaleString('en-US')} pcs)
+                    </span>
+                  ))}
+                </span>
+              </div>
+              {onUndoLastExportContainer && (
+                <button
+                  onClick={onUndoLastExportContainer}
+                  className="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] font-semibold text-slate-300 hover:border-cyan-400 hover:text-white transition cursor-pointer"
+                >
+                  Hoàn tác Cont vừa xuất
+                </button>
+              )}
+            </div>
+          )}
+
           {/* List of Container (PO & SO) Detailed Cards */}
           <div className="space-y-5">
             {filteredPoSummaries.map((poGroup) => {
@@ -423,6 +468,16 @@ export const FulfillmentReportSection: React.FC<FulfillmentReportSectionProps> =
                         <Download className="h-3.5 w-3.5" />
                         <span>Xuất Sheet Cont Này</span>
                       </button>
+                      {onExportContainer && (
+                        <button
+                          onClick={() => onExportContainer(poGroup)}
+                          className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-emerald-500 to-cyan-400 px-3.5 py-2 text-xs font-extrabold text-slate-950 shadow-md shadow-emerald-500/20 hover:brightness-110 transition cursor-pointer"
+                          title="Xuất Cont: Trừ tồn đối soát khỏi hệ thống tồn kho, trừ lũy kế cho các đơn tiếp theo và đưa đơn này ra khỏi kế hoạch xuất"
+                        >
+                          <Ship className="h-3.5 w-3.5" />
+                          <span>Xuất Cont</span>
+                        </button>
+                      )}
                     </div>
                   </div>
 
