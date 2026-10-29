@@ -321,6 +321,34 @@ def build_dataset():
             code = str(r.get('F') or '').strip()
             if code and code != 'None':
                 qty = safe_float(r.get('N'), 0.0)
+                raw_pkg = safe_float(r.get('Q'), 0.0)
+                po_val = str(r.get('E') or '').strip() if r.get('E') else ''
+                feat_val = str(r.get('H') or '').strip() if r.get('H') else ''
+                side_val = detect_side(code, str(r.get('I') or ''))
+
+                is_paired_second = False
+                pair_pkg = raw_pkg
+                pkgs_val = raw_pkg
+
+                # Số #pkg trong file xuất hàng là số kiện đã tính theo cặp Trái/Phải -> giữ nguyên cho cặp, không cộng đúp Trái riêng Phải riêng
+                if (
+                    current_lines
+                    and current_lines[-1]['side'] in ('L', 'R')
+                    and side_val in ('L', 'R')
+                    and current_lines[-1]['side'] != side_val
+                    and current_lines[-1]['po'] == po_val
+                    and current_lines[-1]['feature'] == feat_val
+                    and not current_lines[-1].get('isPairedPkgHead')
+                    and not current_lines[-1].get('isPairedPkgSecondRow')
+                ):
+                    prev_line = current_lines[-1]
+                    pair_pkg = prev_line['pkgs'] if prev_line['pkgs'] > 0 else raw_pkg
+                    prev_line['pkgs'] = pair_pkg
+                    prev_line['pairPkgs'] = pair_pkg
+                    prev_line['isPairedPkgHead'] = True
+                    pkgs_val = 0.0
+                    is_paired_second = True
+
                 line_obj = {
                     'id': f"{sname}-R{r.get('_row')}",
                     'sheet': sname,
@@ -330,10 +358,10 @@ def build_dataset():
                     'type': str(r.get('B') or '').strip(),
                     'pkl': str(r.get('C') or '').strip() if r.get('C') else '',
                     'so': str(r.get('D') or '').strip() if r.get('D') else '',
-                    'po': str(r.get('E') or '').strip() if r.get('E') else '',
+                    'po': po_val,
                     'itemCode': code,
                     'customerItemCode': str(r.get('G') or '').strip() if r.get('G') else '',
-                    'feature': str(r.get('H') or '').strip() if r.get('H') else '',
+                    'feature': feat_val,
                     'description': str(r.get('I') or '').strip() if r.get('I') else '',
                     'dimension': str(r.get('J') or '').strip() if r.get('J') and not str(r.get('J')).startswith('#') else '',
                     'crd': excel_date(r.get('K')),
@@ -342,13 +370,16 @@ def build_dataset():
                     'qty': qty,
                     'unitWeight': safe_float(r.get('O'), 0.0),
                     'pcsPerPkg': safe_float(r.get('P'), 0.0),
-                    'pkgs': safe_float(r.get('Q'), 0.0),
+                    'pkgs': pkgs_val,
+                    'pairPkgs': pair_pkg,
+                    'isPairedPkgHead': False,
+                    'isPairedPkgSecondRow': is_paired_second,
                     'netWeight': safe_float(r.get('R'), 0.0),
                     'grossWeight': safe_float(r.get('S'), 0.0),
                     'cbm': safe_float(r.get('Y'), 0.0),
                     'unitPrice': safe_float(r.get('AA'), 0.0),
                     'totalAmount': safe_float(r.get('AB'), 0.0),
-                    'side': detect_side(code, str(r.get('I') or ''))
+                    'side': side_val
                 }
                 lines.append(line_obj)
                 current_lines.append(line_obj)
@@ -356,7 +387,7 @@ def build_dataset():
                 # Subtotal / container boundary row
                 if current_lines:
                     sub_qty = safe_float(r.get('N'), sum(x['qty'] for x in current_lines))
-                    sub_pkg = safe_float(r.get('Q'), sum(x['pkgs'] for x in current_lines))
+                    sub_pkg = sum(x['pkgs'] for x in current_lines) or safe_float(r.get('Q'), 0.0)
                     sub_nw = safe_float(r.get('R'), sum(x['netWeight'] for x in current_lines))
                     sub_gw = safe_float(r.get('S'), 0.0)
                     sub_cbm = safe_float(r.get('Y'), sum(x['cbm'] for x in current_lines))

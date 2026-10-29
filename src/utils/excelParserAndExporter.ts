@@ -255,7 +255,36 @@ export function parseShipmentWorkbook(
       const code = String(r[5] ?? '').trim();
       if (code && code !== 'None') {
         const qty = Number(r[13] ?? 0) || 0;
+        const rawPkg = Number(r[16] ?? 0) || 0;
+        const poVal = String(r[4] ?? '').trim();
+        const featVal = String(r[7] ?? '').trim();
         const desc = String(r[8] ?? '').trim();
+        const sideVal = detectSide(code, desc);
+
+        let isPairedSecond = false;
+        let pairPkg = rawPkg;
+        let pkgsVal = rawPkg;
+
+        // Số #pkg trong file xuất hàng là số kiện tính theo cặp Trái/Phải -> giữ nguyên theo cặp, không cộng riêng Trái + Phải
+        const prevLine = currentLines[currentLines.length - 1];
+        if (
+          prevLine &&
+          (prevLine.side === 'L' || prevLine.side === 'R') &&
+          (sideVal === 'L' || sideVal === 'R') &&
+          prevLine.side !== sideVal &&
+          prevLine.po === poVal &&
+          prevLine.feature === featVal &&
+          !prevLine.isPairedPkgHead &&
+          !prevLine.isPairedPkgSecondRow
+        ) {
+          pairPkg = prevLine.pkgs > 0 ? prevLine.pkgs : rawPkg;
+          prevLine.pkgs = pairPkg;
+          prevLine.pairPkgs = pairPkg;
+          prevLine.isPairedPkgHead = true;
+          pkgsVal = 0;
+          isPairedSecond = true;
+        }
+
         const lineObj: ShipmentLine = {
           id: `${sname}-R${i + 1}`,
           sheet: sname,
@@ -265,10 +294,10 @@ export function parseShipmentWorkbook(
           type: String(r[1] ?? '').trim(),
           pkl: String(r[2] ?? '').trim(),
           so: String(r[3] ?? '').trim(),
-          po: String(r[4] ?? '').trim(),
+          po: poVal,
           itemCode: code,
           customerItemCode: String(r[6] ?? '').trim(),
-          feature: String(r[7] ?? '').trim(),
+          feature: featVal,
           description: desc,
           dimension: String(r[9] ?? '').trim(),
           crd: formatExcelDate(r[10]),
@@ -277,13 +306,16 @@ export function parseShipmentWorkbook(
           qty,
           unitWeight: Number(r[14] ?? 0) || 0,
           pcsPerPkg: Number(r[15] ?? 0) || 0,
-          pkgs: Number(r[16] ?? 0) || 0,
+          pkgs: pkgsVal,
+          pairPkgs: pairPkg,
+          isPairedPkgHead: false,
+          isPairedPkgSecondRow: isPairedSecond,
           netWeight: Number(r[17] ?? 0) || 0,
           grossWeight: Number(r[18] ?? 0) || 0,
           cbm: Number(r[24] ?? 0) || 0,
           unitPrice: Number(r[26] ?? 0) || 0,
           totalAmount: Number(r[27] ?? 0) || 0,
-          side: detectSide(code, desc)
+          side: sideVal
         };
         lines.push(lineObj);
         currentLines.push(lineObj);
@@ -291,6 +323,7 @@ export function parseShipmentWorkbook(
         const pos = Array.from(new Set(currentLines.map((x) => x.po).filter(Boolean)));
         const sos = Array.from(new Set(currentLines.map((x) => x.so).filter(Boolean)));
         const custs = Array.from(new Set(currentLines.map((x) => x.customer).filter(Boolean)));
+        const pairBasedPkgs = currentLines.reduce((a, b) => a + b.pkgs, 0);
         containers.push({
           containerIndex: contIdx,
           sheet: sname,
@@ -302,7 +335,7 @@ export function parseShipmentWorkbook(
           loadingDate: currentLines[0]?.updatedLoadingDate || currentLines[0]?.loadingDate || '',
           lineCount: currentLines.length,
           totalQty: Number(r[13] ?? 0) || currentLines.reduce((a, b) => a + b.qty, 0),
-          totalPkgs: Number(r[16] ?? 0) || currentLines.reduce((a, b) => a + b.pkgs, 0),
+          totalPkgs: pairBasedPkgs || Number(r[16] ?? 0),
           netWeight: Number(r[17] ?? 0) || currentLines.reduce((a, b) => a + b.netWeight, 0),
           grossWeight: Number(r[18] ?? 0) || 0,
           totalCbm: Number(r[24] ?? 0) || currentLines.reduce((a, b) => a + b.cbm, 0),
@@ -385,8 +418,10 @@ function styleRange(ws: any, sRow: number, sCol: number, eRow: number, eCol: num
 }
 
 /**
- * Helper to build a rich, color-coded, print-ready Container (PO & SO) worksheet
- * with Bin picking locations for warehouse staff.
+ * Helper to build a clean, easy-to-read, print-ready Container (PO & SO) worksheet.
+ * - Minimalist 3-tone palette (Navy header, Clean White/Slate rows, Soft Red only for shortages)
+ * - Essential columns only (no redundant metadata or duplicate tables)
+ * - Merges "Số Kiện (#Pkg - Cặp)" vertically across Left/Right pairs so #pkg is kept by pair
  */
 function buildContainerPoSoWorksheet(
   poGroup: ReconciledPoSummary,
@@ -394,328 +429,144 @@ function buildContainerPoSoWorksheet(
 ): any {
   const contLabel = `Cont #${String(poGroup.containerIndex).padStart(2, '0')}`;
   const isFulfilled = poGroup.status === 'FULFILLED';
-  const totalCols = 20; // Columns A (0) through T (19)
+  const totalCols = 13; // Columns A (0) through M (12)
   const lastColIdx = totalCols - 1;
 
   const rows: any[][] = [];
   const merges: any[] = [];
   const rowHeights: Array<{ hpt: number }> = [];
 
-  // Row 0: Main Title Banner
+  // Row 0: Clean Title Banner
   rows.push([
-    `PHIẾU SOẠN ĐƠN & BÁO CÁO XUẤT CONTAINER — ${contLabel.toUpperCase()} | PO: ${poGroup.po} | SO: ${poGroup.so || 'N/A'}`
+    `PHIẾU SOẠN HÀNG & BÁO CÁO XUẤT CONTAINER — ${contLabel.toUpperCase()} | PO: ${poGroup.po} | SO: ${poGroup.so || poGroup.soList.join(', ') || 'N/A'}`
   ]);
   merges.push({ s: { r: 0, c: 0 }, e: { r: 0, c: lastColIdx } });
-  rowHeights.push({ hpt: 32 });
+  rowHeights.push({ hpt: 30 });
 
-  // Row 1: Subtitle Banner for Printing & Picking
-  rows.push([
-    `TÀI LIỆU IN ĐI SOẠN HÀNG TẠI KHO (KHO 60 & KHO 01) — KÈM VỊ TRÍ BIN (KỆ / Ô) LẤY HÀNG TRỰC QUAN`
-  ]);
-  merges.push({ s: { r: 1, c: 0 }, e: { r: 1, c: lastColIdx } });
-  rowHeights.push({ hpt: 22 });
-
-  // Rows 2..5: Structured Container Metadata Card Grid
+  // Row 1: Compact Key Info Line 1
   const infoRow1 = new Array(totalCols).fill('');
-  infoRow1[0] = 'Số Cont / Block:';
-  infoRow1[2] = contLabel;
-  infoRow1[5] = 'Khách Hàng (Customer):';
-  infoRow1[7] = poGroup.customer || 'N/A';
-  infoRow1[11] = 'Ngày Đóng Cont:';
-  infoRow1[13] = poGroup.loadingDate || 'Chưa cập nhật';
-  infoRow1[16] = 'Trạng Thái Cont:';
-  infoRow1[18] = isFulfilled
-    ? 'ĐỦ HÀNG XUẤT CONT 100%'
-    : `THIẾU HÀNG (${poGroup.shortageLinesCount}/${poGroup.totalLines} mã)`;
+  infoRow1[0] = `Khách hàng: ${poGroup.customer || 'N/A'}   |   Ngày đóng Cont: ${poGroup.loadingDate || 'Chưa cập nhật'}   |   Số mã hàng: ${poGroup.totalLines} mã (${poGroup.fulfilledLinesCount} đủ / ${poGroup.shortageLinesCount} thiếu)`;
+  infoRow1[8] = `Tổng số kiện (theo cặp Trái/Phải): ${poGroup.totalPkgs.toLocaleString('en-US')} kiện   |   Thể tích: ${poGroup.totalCbm.toFixed(2)} CBM`;
   rows.push(infoRow1);
+  merges.push(
+    { s: { r: 1, c: 0 }, e: { r: 1, c: 7 } },
+    { s: { r: 1, c: 8 }, e: { r: 1, c: lastColIdx } }
+  );
   rowHeights.push({ hpt: 22 });
 
+  // Row 2: Compact Key Info Line 2 (Quantities & Status Summary)
   const infoRow2 = new Array(totalCols).fill('');
-  infoRow2[0] = 'Số PO (Purchase Order):';
-  infoRow2[2] = poGroup.po;
-  infoRow2[5] = 'Số SO (Sales Order):';
-  infoRow2[7] = poGroup.so || poGroup.soList.join(', ') || 'N/A';
-  infoRow2[11] = 'Tổng Số Mã Hàng:';
-  infoRow2[13] = `${poGroup.totalLines} mã (${poGroup.fulfilledLinesCount} đủ / ${poGroup.shortageLinesCount} thiếu)`;
-  infoRow2[16] = 'Tỷ Lệ Đáp Ứng:';
-  infoRow2[18] = `${poGroup.fulfillmentRate.toFixed(1)}%`;
-  rows.push(infoRow2);
-  rowHeights.push({ hpt: 22 });
-
-  const infoRow3 = new Array(totalCols).fill('');
-  infoRow3[0] = 'Tổng SL Đặt Xuất (Pcs):';
-  infoRow3[2] = poGroup.totalRequiredQty;
-  infoRow3[5] = 'SL Đáp Ứng (Kho 60+01):';
-  infoRow3[7] = poGroup.totalAllocatedQty;
-  infoRow3[11] = 'Tổng SL Thiếu Hụt:';
-  infoRow3[13] = poGroup.totalShortageQty;
-  infoRow3[16] = 'Tổng Kiện / CBM:';
-  infoRow3[18] = `${poGroup.totalPkgs.toLocaleString('en-US')} pkg | ${poGroup.totalCbm.toFixed(2)} CBM`;
-  rows.push(infoRow3);
-  rowHeights.push({ hpt: 22 });
-
-  const infoRow4 = new Array(totalCols).fill('');
-  infoRow4[0] = 'Phương Thức Tính Tồn:';
-  infoRow4[2] =
+  const modeLabel =
     allocationMode === 'direct'
-      ? 'Tính riêng từng Cont độc lập với Tồn Kho 01 + Kho 60'
-      : 'Tính lũy kế FIFO theo thứ tự Cont xuất';
-  infoRow4[11] = 'Tổng Giá Trị (USD):';
-  infoRow4[13] = Number(poGroup.totalAmount.toFixed(2));
-  infoRow4[16] = 'Ngày In Phiếu:';
-  infoRow4[18] = new Date().toLocaleString('vi-VN');
-  rows.push(infoRow4);
+      ? 'Tính độc lập từng Cont (Kho 01 + Kho 60)'
+      : 'Tính lũy kế FIFO theo thứ tự Cont';
+  infoRow2[0] = `Tổng SL xuất: ${poGroup.totalRequiredQty.toLocaleString('en-US')} pcs   |   Đáp ứng: ${poGroup.totalAllocatedQty.toLocaleString('en-US')} pcs (${poGroup.fulfillmentRate.toFixed(1)}%)   |   SL thiếu: ${poGroup.totalShortageQty.toLocaleString('en-US')} pcs   |   Chế độ: ${modeLabel}`;
+  infoRow2[8] = isFulfilled
+    ? 'TRẠNG THÁI: ĐỦ HÀNG XUẤT 100%'
+    : `TRẠNG THÁI: THIẾU ${poGroup.shortageLinesCount} MÃ (-${poGroup.totalShortageQty.toLocaleString('en-US')} pcs): ${poGroup.shortageLines.map((x) => `${x.itemCode} (-${x.shortageQty})`).join(', ')}`;
+  rows.push(infoRow2);
+  merges.push(
+    { s: { r: 2, c: 0 }, e: { r: 2, c: 7 } },
+    { s: { r: 2, c: 8 }, e: { r: 2, c: lastColIdx } }
+  );
   rowHeights.push({ hpt: 22 });
 
-  for (let r = 2; r <= 5; r++) {
-    merges.push(
-      { s: { r, c: 0 }, e: { r, c: 1 } },
-      { s: { r, c: 2 }, e: { r, c: r === 5 ? 10 : 4 } },
-      ...(r === 5
-        ? []
-        : [
-            { s: { r, c: 5 }, e: { r, c: 6 } },
-            { s: { r, c: 7 }, e: { r, c: 10 } }
-          ]),
-      { s: { r, c: 11 }, e: { r, c: 12 } },
-      { s: { r, c: 13 }, e: { r, c: 15 } },
-      { s: { r, c: 16 }, e: { r, c: 17 } },
-      { s: { r, c: 18 }, e: { r, c: 19 } }
-    );
-  }
-
-  // Row 6: Blank separator
+  // Row 3: Blank separator
   rows.push([]);
-  rowHeights.push({ hpt: 10 });
+  rowHeights.push({ hpt: 8 });
 
-  // Track section indices for styling after sheet creation
-  const section1BannerRow = rows.length;
-  let section1HeaderRow = -1;
-  let section1DataStart = -1;
-  let section1DataEnd = -1;
-  let section1TotalRow = -1;
-
-  if (poGroup.shortageLines.length > 0) {
-    rows.push([
-      `I. DANH SÁCH CÁC MÃ ĐANG THIẾU CỦA CONT (PO: ${poGroup.po} & SO: ${poGroup.so || 'N/A'}) — THIẾU ${poGroup.shortageLines.length} MÃ (TỔNG THIẾU: -${poGroup.totalShortageQty.toLocaleString('en-US')} PCS)`
-    ]);
-    merges.push({ s: { r: section1BannerRow, c: 0 }, e: { r: section1BannerRow, c: lastColIdx } });
-    rowHeights.push({ hpt: 25 });
-
-    section1HeaderRow = rows.length;
-    rows.push([
-      'STT',
-      'Số PO',
-      'Số SO',
-      'Mã Hàng Thiếu (LPVN Code)',
-      'Model',
-      'Bên (Trái/Phải)',
-      'Mô Tả Hàng Hóa',
-      'SL Cần Xuất (Qty)',
-      'Tồn Kho 01',
-      'Tồn Kho 60',
-      'Tồn Khả Dụng (01+60)',
-      'SL Lấy Kho 60',
-      'SL Lấy Kho 01',
-      'Tổng Đáp Ứng',
-      'SỐ LƯỢNG THIẾU (Pcs)',
-      'Tỷ Lệ (%)',
-      'VỊ TRÍ BIN LẤY PHẦN TỒN HIỆN CÓ (KHO 60 / KHO 01)',
-      'TOÀN BỘ VỊ TRÍ BIN CỦA MÃ',
-      'Mức Độ Thiếu',
-      'Ghi Chú Soạn Đơn'
-    ]);
-    rowHeights.push({ hpt: 28 });
-
-    section1DataStart = rows.length;
-    poGroup.shortageLines.forEach((l, idx) => {
-      const binPick = l.pickingBinsText || 'Hết tồn kho (Không có Bin)';
-      const binAll = l.allBinsText || (l.bins?.length ? l.bins.join(', ') : 'Không có Bin');
-      rows.push([
-        idx + 1,
-        l.po,
-        l.so,
-        l.itemCode,
-        l.feature,
-        l.side === 'L' ? 'Trái (LHF)' : l.side === 'R' ? 'Phải (RHF)' : 'Chung',
-        l.description,
-        l.qty,
-        l.wh01Initial,
-        l.wh60Initial,
-        l.stockBeforeLine,
-        l.allocatedWh60,
-        l.allocatedWh01,
-        l.allocatedTotal,
-        l.shortageQty,
-        Number(l.fulfillmentRate.toFixed(1)),
-        binPick,
-        binAll,
-        l.fulfillmentStatus === 'ZERO_STOCK' ? 'HẾT TỒN KHO (0 Pcs)' : 'THIẾU MỘT PHẦN',
-        `Cần bổ sung ${l.shortageQty} pcs`
-      ]);
-      const estLines = Math.max(1, Math.ceil(Math.max(binPick.length, binAll.length) / 36));
-      rowHeights.push({ hpt: Math.max(22, Math.min(60, estLines * 16 + 6)) });
-    });
-    section1DataEnd = rows.length - 1;
-
-    section1TotalRow = rows.length;
-    rows.push([
-      '',
-      '',
-      '',
-      'TỔNG CỘNG MÃ THIẾU TRONG CONT:',
-      '',
-      '',
-      '',
-      poGroup.shortageLines.reduce((a, b) => a + b.qty, 0),
-      '',
-      '',
-      '',
-      poGroup.shortageLines.reduce((a, b) => a + b.allocatedWh60, 0),
-      poGroup.shortageLines.reduce((a, b) => a + b.allocatedWh01, 0),
-      poGroup.shortageLines.reduce((a, b) => a + b.allocatedTotal, 0),
-      poGroup.totalShortageQty,
-      '',
-      '',
-      '',
-      `THIẾU ${poGroup.shortageLines.length} MÃ`,
-      ''
-    ]);
-    rowHeights.push({ hpt: 24 });
-
-    rows.push([]);
-    rowHeights.push({ hpt: 10 });
-  } else {
-    rows.push([
-      `I. TÌNH TRẠNG THIẾU HỤT: CONT (PO: ${poGroup.po} & SO: ${poGroup.so || 'N/A'}) ĐỦ HÀNG XUẤT 100% — KHÔNG THIẾU MÃ NÀO (SẴN SÀNG ĐI SOẠN ĐƠN THEO BIN)`
-    ]);
-    merges.push({ s: { r: section1BannerRow, c: 0 }, e: { r: section1BannerRow, c: lastColIdx } });
-    rowHeights.push({ hpt: 25 });
-
-    rows.push([]);
-    rowHeights.push({ hpt: 10 });
-  }
-
-  // Section 2: Full Picking & Container Line List with Bin Locations
-  const section2BannerRow = rows.length;
-  rows.push([
-    `II. BẢNG SOẠN ĐƠN CHI TIẾT TOÀN BỘ MÃ HÀNG TRONG CONT & VỊ TRÍ BIN LẤY HÀNG (PO: ${poGroup.po} & SO: ${poGroup.so || 'N/A'}) — ${poGroup.totalLines} MÃ`
-  ]);
-  merges.push({ s: { r: section2BannerRow, c: 0 }, e: { r: section2BannerRow, c: lastColIdx } });
-  rowHeights.push({ hpt: 26 });
-
-  const section2HeaderRow = rows.length;
+  // Row 4: Unified Table Header (13 Essential Columns)
+  const headerRowIdx = rows.length;
   rows.push([
     'STT',
-    'Số PO',
-    'Số SO',
-    'Mã Hàng (LPVN Code)',
+    'Mã Hàng (Item Code)',
     'Model',
     'Bên (Trái/Phải)',
     'Mô Tả Hàng Hóa',
-    'Ngày Xuất Dự Kiến',
-    'SL Cần Xuất (Qty)',
-    'Số Kiện (#Pkg)',
+    'SL Xuất (Pcs)',
+    'Số Kiện (#Pkg - Cặp)',
     'Tồn Kho 01',
     'Tồn Kho 60',
-    'Tồn Khả Dụng (01+60)',
-    'Lấy Kho 60 (Pcs)',
-    'Lấy Kho 01 (Pcs)',
-    'SL Đáp Ứng',
-    'SL Thiếu Hụt',
-    'VỊ TRÍ BIN GỢI Ý SOẠN ĐƠN (KỆ / Ô & SỐ LƯỢNG LẤY)',
-    'TOÀN BỘ VỊ TRÍ BIN ĐANG TỒN (KHO 60 & KHO 01)',
-    'Trạng Thái / Tick Soạn'
+    'Tổng Tồn (01+60)',
+    'SL Thiếu (Pcs)',
+    'Trạng Thái',
+    'Vị Trí Bin Lấy Hàng (Kho 60 / Kho 01)'
   ]);
-  rowHeights.push({ hpt: 30 });
+  rowHeights.push({ hpt: 28 });
 
-  const section2DataStart = rows.length;
+  // Rows 5..N: Container Lines (with vertical merge on Col 6 for Left/Right pairs)
+  const dataStartRow = rows.length;
   poGroup.lines.forEach((l, idx) => {
-    const binPick = l.pickingBinsText || (l.bins?.length ? l.bins.join(', ') : 'Không có Bin');
-    const binAll = l.allBinsText || (l.bins?.length ? l.bins.join(', ') : 'Không có Bin');
+    const rIdx = rows.length;
+    const binPick =
+      l.pickingBinsText && !l.pickingBinsText.startsWith('Hết tồn')
+        ? l.pickingBinsText
+        : l.allBinsText || (l.bins?.length ? l.bins.join(', ') : 'Không có Bin');
+
+    // If this row is the first row of a Left/Right pair, merge Col 6 (Số Kiện) with the next row
+    const pkgDisplay = l.isPairedPkgSecondRow ? '' : l.pairPkgs ?? l.pkgs;
+    if (l.isPairedPkgHead && idx + 1 < poGroup.lines.length) {
+      merges.push({ s: { r: rIdx, c: 6 }, e: { r: rIdx + 1, c: 6 } });
+    }
+
     rows.push([
       idx + 1,
-      l.po,
-      l.so,
       l.itemCode,
       l.feature,
-      l.side === 'L' ? 'Trái (LHF)' : l.side === 'R' ? 'Phải (RHF)' : 'Chung',
+      l.side === 'L' ? 'Trái (L)' : l.side === 'R' ? 'Phải (R)' : 'Chung',
       l.description,
-      l.updatedLoadingDate || l.loadingDate || l.crd,
       l.qty,
-      l.pkgs,
+      pkgDisplay,
       l.wh01Initial,
       l.wh60Initial,
       l.stockBeforeLine,
-      l.allocatedWh60,
-      l.allocatedWh01,
-      l.allocatedTotal,
-      l.shortageQty,
-      binPick,
-      binAll,
-      l.shortageQty > 0 ? `THIẾU -${l.shortageQty} PCS` : '☐ ĐỦ HÀNG (100%)'
+      l.shortageQty > 0 ? l.shortageQty : 0,
+      l.shortageQty > 0 ? `THIẾU -${l.shortageQty.toLocaleString('en-US')}` : 'Đủ hàng',
+      binPick
     ]);
-    const estLines = Math.max(1, Math.ceil(Math.max(binPick.length, binAll.length) / 38));
-    rowHeights.push({ hpt: Math.max(23, Math.min(68, estLines * 15 + 7)) });
-  });
-  const section2DataEnd = rows.length - 1;
 
-  const section2TotalRow = rows.length;
+    const estLines = Math.max(1, Math.ceil(binPick.length / 46));
+    rowHeights.push({ hpt: Math.max(22, Math.min(54, estLines * 15 + 6)) });
+  });
+  const dataEndRow = rows.length - 1;
+
+  // Total Row
+  const totalRowIdx = rows.length;
   rows.push([
     '',
+    'TỔNG CỘNG CONTAINER',
     '',
     '',
-    'TỔNG CỘNG TOÀN CONT:',
-    '',
-    '',
-    '',
-    '',
+    `${poGroup.totalLines} mã hàng`,
     poGroup.totalRequiredQty,
     poGroup.totalPkgs,
     '',
     '',
     '',
-    poGroup.lines.reduce((a, b) => a + b.allocatedWh60, 0),
-    poGroup.lines.reduce((a, b) => a + b.allocatedWh01, 0),
-    poGroup.totalAllocatedQty,
     poGroup.totalShortageQty,
-    `Tổng thể tích: ${poGroup.totalCbm.toFixed(2)} CBM`,
-    `Tổng giá trị: $${poGroup.totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
-    isFulfilled ? 'ĐỦ 100%' : `THIẾU -${poGroup.totalShortageQty} PCS`
+    isFulfilled ? 'ĐỦ 100%' : `THIẾU -${poGroup.totalShortageQty.toLocaleString('en-US')}`,
+    `Tổng thể tích: ${poGroup.totalCbm.toFixed(2)} CBM   |   Trị giá: $${poGroup.totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
   ]);
-  rowHeights.push({ hpt: 26 });
+  merges.push({ s: { r: totalRowIdx, c: 1 }, e: { r: totalRowIdx, c: 3 } });
+  rowHeights.push({ hpt: 25 });
 
-  // Blank row + Signature Block for Printed Picking Sheet
+  // Blank row + Clean Signature Footer
   rows.push([]);
   rowHeights.push({ hpt: 12 });
 
   const sigRow = rows.length;
   const sigLine = new Array(totalCols).fill('');
   sigLine[1] = 'NGƯỜI LẬP PHIẾU';
-  sigLine[6] = 'NHÂN VIÊN SOẠN ĐƠN (LẤY HÀNG THEO BIN)';
-  sigLine[12] = 'THỦ KHO XUẤT (KHO 01 / KHO 60)';
-  sigLine[17] = 'GIÁM SÁT ĐÓNG CONT';
+  sigLine[5] = 'NHÂN VIÊN SOẠN HÀNG (THEO BIN)';
+  sigLine[9] = 'THỦ KHO XUẤT (KHO 01 / 60)';
+  sigLine[12] = 'GIÁM SÁT ĐÓNG CONT';
   rows.push(sigLine);
-  rowHeights.push({ hpt: 22 });
-
-  const sigNoteRow = rows.length;
-  const sigNote = new Array(totalCols).fill('');
-  sigNote[1] = '(Ký & ghi rõ họ tên)';
-  sigNote[6] = '(Kiểm tra đúng mã, bên Trái/Phải & vị trí Bin)';
-  sigNote[12] = '(Xác nhận trừ tồn kho thực tế)';
-  sigNote[17] = '(Xác nhận hoàn thành đóng Cont)';
-  rows.push(sigNote);
-  rowHeights.push({ hpt: 18 });
+  rowHeights.push({ hpt: 20 });
 
   merges.push(
-    { s: { r: sigRow, c: 1 }, e: { r: sigRow, c: 4 } },
-    { s: { r: sigRow, c: 6 }, e: { r: sigRow, c: 10 } },
-    { s: { r: sigRow, c: 12 }, e: { r: sigRow, c: 15 } },
-    { s: { r: sigRow, c: 17 }, e: { r: sigRow, c: 19 } },
-    { s: { r: sigNoteRow, c: 1 }, e: { r: sigNoteRow, c: 4 } },
-    { s: { r: sigNoteRow, c: 6 }, e: { r: sigNoteRow, c: 10 } },
-    { s: { r: sigNoteRow, c: 12 }, e: { r: sigNoteRow, c: 15 } },
-    { s: { r: sigNoteRow, c: 17 }, e: { r: sigNoteRow, c: 19 } }
+    { s: { r: sigRow, c: 1 }, e: { r: sigRow, c: 3 } },
+    { s: { r: sigRow, c: 5 }, e: { r: sigRow, c: 7 } },
+    { s: { r: sigRow, c: 9 }, e: { r: sigRow, c: 11 } }
   );
 
   const ws = XLSX.utils.aoa_to_sheet(rows);
@@ -723,275 +574,160 @@ function buildContainerPoSoWorksheet(
   ws['!rows'] = rowHeights;
   ws['!cols'] = [
     { wch: 6 },  // A: STT
-    { wch: 15 }, // B: PO
-    { wch: 15 }, // C: SO
-    { wch: 16 }, // D: Mã Hàng
-    { wch: 11 }, // E: Model
-    { wch: 13 }, // F: Bên
-    { wch: 28 }, // G: Mô Tả
-    { wch: 13 }, // H: Ngày Xuất
-    { wch: 14 }, // I: SL Cần Xuất
-    { wch: 11 }, // J: Số Kiện
-    { wch: 12 }, // K: Tồn Kho 01
-    { wch: 12 }, // L: Tồn Kho 60
-    { wch: 15 }, // M: Tồn Khả Dụng
-    { wch: 13 }, // N: Lấy Kho 60
-    { wch: 13 }, // O: Lấy Kho 01
-    { wch: 13 }, // P: SL Đáp Ứng
-    { wch: 13 }, // Q: SL Thiếu
-    { wch: 38 }, // R: Vị Trí Bin Gợi Ý Soạn Đơn
-    { wch: 38 }, // S: Toàn Bộ Vị Trí Bin Đang Tồn
-    { wch: 20 }  // T: Trạng Thái / Tick Soạn
+    { wch: 15 }, // B: Mã Hàng
+    { wch: 10 }, // C: Model
+    { wch: 12 }, // D: Bên (Trái/Phải)
+    { wch: 28 }, // E: Mô Tả Hàng Hóa
+    { wch: 13 }, // F: SL Xuất (Pcs)
+    { wch: 15 }, // G: Số Kiện (#Pkg - Cặp)
+    { wch: 12 }, // H: Tồn Kho 01
+    { wch: 12 }, // I: Tồn Kho 60
+    { wch: 14 }, // J: Tổng Tồn (01+60)
+    { wch: 13 }, // K: SL Thiếu (Pcs)
+    { wch: 16 }, // L: Trạng Thái
+    { wch: 46 }  // M: Vị Trí Bin Lấy Hàng
   ];
 
-  // Page Setup for Landscape Printing
   ws['!pageSetup'] = {
     orientation: 'landscape',
-    paperSize: 9, // A4
+    paperSize: 9,
     fitToWidth: 1,
     fitToHeight: 0
   };
 
-  // Apply Styles to Row 0 (Main Banner) & Row 1 (Subtitle Banner)
+  // 1. Style Title Banner (Row 0) - Clean Navy
   styleRange(ws, 0, 0, 0, lastColIdx, {
-    fill: { fgColor: { rgb: '0F172A' } },
-    font: { name: 'Arial', sz: 13, bold: true, color: { rgb: 'FFFFFF' } },
-    alignment: { horizontal: 'center', vertical: 'center' }
-  });
-  styleRange(ws, 1, 0, 1, lastColIdx, {
     fill: { fgColor: { rgb: '1E3A8A' } },
-    font: { name: 'Arial', sz: 10, bold: true, color: { rgb: 'FDE047' } },
-    alignment: { horizontal: 'center', vertical: 'center' }
+    font: { name: 'Arial', sz: 12, bold: true, color: { rgb: 'FFFFFF' } },
+    alignment: { horizontal: 'left', vertical: 'center' }
   });
 
-  // Apply Styles to Metadata Info Box (Rows 2..5)
-  for (let r = 2; r <= 5; r++) {
+  // 2. Style Compact Summary Rows (Rows 1..2) - Subtle Slate
+  for (const r of [1, 2]) {
     styleRange(ws, r, 0, r, lastColIdx, {
       fill: { fgColor: { rgb: 'F8FAFC' } },
-      font: { name: 'Arial', sz: 10, bold: true, color: { rgb: '0F172A' } },
+      font: { name: 'Arial', sz: 9.5, bold: false, color: { rgb: '1E293B' } },
       border: THIN_BORDER,
-      alignment: { horizontal: 'left', vertical: 'center' }
+      alignment: { horizontal: 'left', vertical: 'center', wrapText: true }
     });
-    for (const labelCol of [0, 1, 5, 6, 11, 12, 16, 17]) {
-      if (r === 5 && (labelCol === 5 || labelCol === 6)) continue;
-      setCellStyle(ws, r, labelCol, {
-        fill: { fgColor: { rgb: 'E2E8F0' } },
-        font: { name: 'Arial', sz: 10, bold: true, color: { rgb: '1E293B' } },
-        border: THIN_BORDER,
-        alignment: { horizontal: 'left', vertical: 'center' }
-      });
-    }
   }
-  // Highlight PO, SO, Status in Metadata Box
-  setCellStyle(ws, 3, 2, {
-    fill: { fgColor: { rgb: 'FEF3C7' } },
-    font: { name: 'Arial', sz: 11, bold: true, color: { rgb: 'B45309' } },
+  setCellStyle(ws, 1, 8, {
+    fill: { fgColor: { rgb: 'F8FAFC' } },
+    font: { name: 'Arial', sz: 9.5, bold: true, color: { rgb: '0F172A' } },
     border: THIN_BORDER,
     alignment: { horizontal: 'left', vertical: 'center' }
   });
-  setCellStyle(ws, 3, 7, {
-    fill: { fgColor: { rgb: 'E0F2FE' } },
-    font: { name: 'Arial', sz: 11, bold: true, color: { rgb: '0369A1' } },
-    border: THIN_BORDER,
-    alignment: { horizontal: 'left', vertical: 'center' }
-  });
-  setCellStyle(ws, 2, 18, {
-    fill: { fgColor: { rgb: isFulfilled ? 'DCFCE7' : 'FEE2E2' } },
-    font: { name: 'Arial', sz: 10, bold: true, color: { rgb: isFulfilled ? '15803D' : 'B91C1C' } },
-    border: THIN_BORDER,
-    alignment: { horizontal: 'center', vertical: 'center' }
-  });
-  setCellStyle(ws, 4, 2, {
-    fill: { fgColor: { rgb: 'F1F5F9' } },
-    font: { name: 'Arial', sz: 11, bold: true, color: { rgb: '0F172A' } },
-    border: THIN_BORDER,
-    alignment: { horizontal: 'right', vertical: 'center' },
-    numFmt: '#,##0'
-  });
-  setCellStyle(ws, 4, 7, {
-    fill: { fgColor: { rgb: 'DCFCE7' } },
-    font: { name: 'Arial', sz: 11, bold: true, color: { rgb: '15803D' } },
-    border: THIN_BORDER,
-    alignment: { horizontal: 'right', vertical: 'center' },
-    numFmt: '#,##0'
-  });
-  setCellStyle(ws, 4, 13, {
-    fill: { fgColor: { rgb: poGroup.totalShortageQty > 0 ? 'FEE2E2' : 'F8FAFC' } },
+  setCellStyle(ws, 2, 8, {
+    fill: { fgColor: { rgb: isFulfilled ? 'F0FDF4' : 'FEF2F2' } },
     font: {
       name: 'Arial',
-      sz: 11,
+      sz: 9.5,
       bold: true,
-      color: { rgb: poGroup.totalShortageQty > 0 ? 'B91C1C' : '64748B' }
+      color: { rgb: isFulfilled ? '15803D' : 'B91C1C' }
     },
     border: THIN_BORDER,
-    alignment: { horizontal: 'right', vertical: 'center' },
-    numFmt: '#,##0'
+    alignment: { horizontal: 'left', vertical: 'center', wrapText: true }
   });
 
-  // Style Section 1
-  if (poGroup.shortageLines.length > 0) {
-    styleRange(ws, section1BannerRow, 0, section1BannerRow, lastColIdx, {
-      fill: { fgColor: { rgb: '991B1B' } },
-      font: { name: 'Arial', sz: 11, bold: true, color: { rgb: 'FFFFFF' } },
-      alignment: { horizontal: 'left', vertical: 'center' }
-    });
-    styleRange(ws, section1HeaderRow, 0, section1HeaderRow, lastColIdx, {
-      fill: { fgColor: { rgb: 'B91C1C' } },
-      font: { name: 'Arial', sz: 9, bold: true, color: { rgb: 'FFFFFF' } },
-      border: MEDIUM_BOX_BORDER,
-      alignment: { horizontal: 'center', vertical: 'center', wrapText: true }
-    });
-    for (let r = section1DataStart; r <= section1DataEnd; r++) {
-      for (let c = 0; c <= lastColIdx; c++) {
-        const isNum = c >= 7 && c <= 15;
-        const isShortCol = c === 14;
-        const isBinCol = c === 16 || c === 17;
-        setCellStyle(ws, r, c, {
-          fill: { fgColor: { rgb: isBinCol ? 'FEF3C7' : isShortCol ? 'FEE2E2' : 'FFF1F2' } },
-          font: {
-            name: 'Arial',
-            sz: 9,
-            bold: c === 3 || isShortCol || isBinCol,
-            color: { rgb: isShortCol ? 'B91C1C' : isBinCol ? '92400E' : '0F172A' }
-          },
-          border: THIN_BORDER,
-          alignment: {
-            horizontal: c === 0 || c === 4 || c === 5 || c === 18 ? 'center' : isNum ? 'right' : 'left',
-            vertical: 'center',
-            wrapText: isBinCol || c === 6
-          },
-          ...(isNum && c !== 15 ? { numFmt: '#,##0' } : {})
-        });
-      }
-    }
-    styleRange(ws, section1TotalRow, 0, section1TotalRow, lastColIdx, {
-      fill: { fgColor: { rgb: 'FECACA' } },
-      font: { name: 'Arial', sz: 10, bold: true, color: { rgb: '7F1D1D' } },
-      border: MEDIUM_BOX_BORDER,
-      alignment: { horizontal: 'right', vertical: 'center' },
-      numFmt: '#,##0'
-    });
-    setCellStyle(ws, section1TotalRow, 3, {
-      fill: { fgColor: { rgb: 'FECACA' } },
-      font: { name: 'Arial', sz: 10, bold: true, color: { rgb: '7F1D1D' } },
-      border: MEDIUM_BOX_BORDER,
-      alignment: { horizontal: 'left', vertical: 'center' }
-    });
-  } else {
-    styleRange(ws, section1BannerRow, 0, section1BannerRow, lastColIdx, {
-      fill: { fgColor: { rgb: '065F46' } },
-      font: { name: 'Arial', sz: 10, bold: true, color: { rgb: 'FFFFFF' } },
-      alignment: { horizontal: 'left', vertical: 'center' }
-    });
-  }
-
-  // Style Section 2 (Main Picking Table with Bin Locations)
-  styleRange(ws, section2BannerRow, 0, section2BannerRow, lastColIdx, {
-    fill: { fgColor: { rgb: '0F766E' } },
-    font: { name: 'Arial', sz: 11, bold: true, color: { rgb: 'FFFFFF' } },
-    alignment: { horizontal: 'left', vertical: 'center' }
-  });
-
+  // 3. Style Table Header (Row 4) - Single Uniform Navy
   for (let c = 0; c <= lastColIdx; c++) {
-    const headerBg = c <= 9 ? '1E3A8A' : c <= 16 ? '0E7490' : 'B45309';
-    setCellStyle(ws, section2HeaderRow, c, {
-      fill: { fgColor: { rgb: headerBg } },
-      font: { name: 'Arial', sz: 9, bold: true, color: { rgb: 'FFFFFF' } },
+    setCellStyle(ws, headerRowIdx, c, {
+      fill: { fgColor: { rgb: '1E3A8A' } },
+      font: { name: 'Arial', sz: 9.5, bold: true, color: { rgb: 'FFFFFF' } },
       border: MEDIUM_BOX_BORDER,
       alignment: { horizontal: 'center', vertical: 'center', wrapText: true }
     });
   }
 
-  for (let r = section2DataStart; r <= section2DataEnd; r++) {
-    const lineIdx = r - section2DataStart;
+  // 4. Style Data Rows - Clean White/Slate for Normal, Soft Rose Only for Shortage
+  for (let r = dataStartRow; r <= dataEndRow; r++) {
+    const lineIdx = r - dataStartRow;
     const lineObj = poGroup.lines[lineIdx];
     const isShort = lineObj && lineObj.shortageQty > 0;
-    const zebraBg = isShort ? 'FFF1F2' : lineIdx % 2 === 0 ? 'FFFFFF' : 'F8FAFC';
+    const rowBg = isShort ? 'FFF1F2' : lineIdx % 2 === 0 ? 'FFFFFF' : 'F8FAFC';
 
     for (let c = 0; c <= lastColIdx; c++) {
-      const isNum = c >= 8 && c <= 16;
-      const isBinSuggest = c === 17;
-      const isBinAll = c === 18;
-      const isStatusCol = c === 19;
-      const isSideCol = c === 5;
+      const isNum = c >= 5 && c <= 10;
+      const isPkgCol = c === 6;
+      const isShortCol = c === 10;
+      const isStatusCol = c === 11;
+      const isSideCol = c === 3;
 
-      let cellBg = zebraBg;
+      let cellBg = rowBg;
       let textColor = '0F172A';
-      let isBold = c === 3 || c === 8;
+      let isBold = c === 1 || c === 5 || isPkgCol;
 
-      if (isSideCol && lineObj) {
-        if (lineObj.side === 'L') {
-          cellBg = 'E0F2FE';
-          textColor = '0369A1';
+      if (isPkgCol) {
+        // Keep paired #pkg cell clean and clearly readable across the L/R pair
+        cellBg = isShort ? 'FFF1F2' : 'F8FAFC';
+        textColor = '0F172A';
+      } else if (isSideCol && lineObj) {
+        textColor = lineObj.side === 'L' ? '0369A1' : lineObj.side === 'R' ? '047857' : '475569';
+        isBold = true;
+      } else if (isShortCol) {
+        if (isShort) {
+          cellBg = 'FEE2E2';
+          textColor = 'B91C1C';
           isBold = true;
-        } else if (lineObj.side === 'R') {
-          cellBg = 'D1FAE5';
-          textColor = '047857';
+        } else {
+          textColor = '94A3B8';
+        }
+      } else if (isStatusCol) {
+        if (isShort) {
+          cellBg = 'FEE2E2';
+          textColor = 'B91C1C';
+          isBold = true;
+        } else {
+          textColor = '15803D';
           isBold = true;
         }
-      } else if (isBinSuggest) {
-        cellBg = 'FEF3C7';
-        textColor = '92400E';
-        isBold = true;
-      } else if (isBinAll) {
-        cellBg = 'FFFBEB';
-        textColor = '78350F';
-      } else if (isStatusCol) {
-        cellBg = isShort ? 'FEE2E2' : 'DCFCE7';
-        textColor = isShort ? 'B91C1C' : '15803D';
-        isBold = true;
-      } else if (c === 16 && isShort) {
-        cellBg = 'FEE2E2';
-        textColor = 'B91C1C';
-        isBold = true;
-      } else if (c === 13 || c === 14 || c === 15) {
-        cellBg = 'F0FDFA';
-        textColor = '0F766E';
-        isBold = c === 15;
       }
 
       setCellStyle(ws, r, c, {
         fill: { fgColor: { rgb: cellBg } },
-        font: { name: 'Arial', sz: 9, bold: isBold, color: { rgb: textColor } },
+        font: { name: 'Arial', sz: 9.5, bold: isBold, color: { rgb: textColor } },
         border: THIN_BORDER,
         alignment: {
           horizontal:
-            c === 0 || c === 4 || c === 5 || c === 7 || isStatusCol
+            c === 0 || c === 2 || isSideCol || isPkgCol || isStatusCol
               ? 'center'
               : isNum
               ? 'right'
               : 'left',
           vertical: 'center',
-          wrapText: isBinSuggest || isBinAll || c === 6
+          wrapText: c === 4 || c === 12
         },
         ...(isNum ? { numFmt: '#,##0' } : {})
       });
     }
   }
 
-  // Style Section 2 Total Row
+  // 5. Style Total Row - Clean Soft Slate (No bright neon yellow)
   for (let c = 0; c <= lastColIdx; c++) {
-    const isNum = c >= 8 && c <= 16;
-    setCellStyle(ws, section2TotalRow, c, {
-      fill: { fgColor: { rgb: 'FEF08A' } },
-      font: { name: 'Arial', sz: 10, bold: true, color: { rgb: '0F172A' } },
+    const isNum = c === 5 || c === 6 || c === 10;
+    const isShortTotal = (c === 10 || c === 11) && !isFulfilled;
+    setCellStyle(ws, totalRowIdx, c, {
+      fill: { fgColor: { rgb: isShortTotal ? 'FEE2E2' : 'E2E8F0' } },
+      font: {
+        name: 'Arial',
+        sz: 10,
+        bold: true,
+        color: { rgb: isShortTotal ? 'B91C1C' : '0F172A' }
+      },
       border: MEDIUM_BOX_BORDER,
       alignment: {
-        horizontal: c === 3 || c === 17 || c === 18 ? 'left' : c === 19 ? 'center' : 'right',
+        horizontal:
+          c === 6 || c === 11 ? 'center' : isNum ? 'right' : 'left',
         vertical: 'center'
       },
       ...(isNum ? { numFmt: '#,##0' } : {})
     });
   }
 
-  // Style Signature Rows
-  for (const colStart of [1, 6, 12, 17]) {
+  // 6. Style Signature Row
+  for (const colStart of [1, 5, 9, 12]) {
     setCellStyle(ws, sigRow, colStart, {
-      font: { name: 'Arial', sz: 10, bold: true, color: { rgb: '1E293B' } },
-      alignment: { horizontal: 'center', vertical: 'center' }
-    });
-    setCellStyle(ws, sigNoteRow, colStart, {
-      font: { name: 'Arial', sz: 9, italic: true, color: { rgb: '475569' } },
+      font: { name: 'Arial', sz: 9.5, bold: true, color: { rgb: '334155' } },
       alignment: { horizontal: 'center', vertical: 'center' }
     });
   }
@@ -1000,8 +736,8 @@ function buildContainerPoSoWorksheet(
 }
 
 /**
- * Universal helper to apply clean header, zebra striping, status badge colors, and borders
- * to standard summary tables in Excel workbooks.
+ * Universal helper to apply a clean, minimalist style to summary worksheets.
+ * Highlights only headers and actual shortage/imbalance alerts.
  */
 function styleStandardDataSheet(
   ws: any,
@@ -1018,7 +754,7 @@ function styleStandardDataSheet(
     numberColIndices?: number[];
   }
 ) {
-  const bannerBg = options?.bannerBg || '0F172A';
+  const bannerBg = options?.bannerBg || '1E3A8A';
   const headerBg = options?.headerBg || '1E3A8A';
   const binCols = new Set(options?.binColIndices || []);
   const statusCols = new Set(options?.statusColIndices || []);
@@ -1028,23 +764,36 @@ function styleStandardDataSheet(
   if (options?.titleBanner && headerRowIdx > 0) {
     styleRange(ws, 0, 0, 0, totalCols - 1, {
       fill: { fgColor: { rgb: bannerBg } },
-      font: { name: 'Arial', sz: 13, bold: true, color: { rgb: 'FFFFFF' } },
+      font: { name: 'Arial', sz: 12, bold: true, color: { rgb: 'FFFFFF' } },
       alignment: { horizontal: 'left', vertical: 'center' }
     });
   }
 
   for (let c = 0; c < totalCols; c++) {
-    const isBin = binCols.has(c);
     setCellStyle(ws, headerRowIdx, c, {
-      fill: { fgColor: { rgb: isBin ? 'B45309' : headerBg } },
-      font: { name: 'Arial', sz: 9, bold: true, color: { rgb: 'FFFFFF' } },
+      fill: { fgColor: { rgb: headerBg } },
+      font: { name: 'Arial', sz: 9.5, bold: true, color: { rgb: 'FFFFFF' } },
       border: MEDIUM_BOX_BORDER,
       alignment: { horizontal: 'center', vertical: 'center', wrapText: true }
     });
   }
 
   for (let r = headerRowIdx + 1; r < totalRows; r++) {
-    const zebra = (r - headerRowIdx) % 2 === 1 ? 'FFFFFF' : 'F8FAFC';
+    // Check if this row has a shortage status so we can give it a subtle rose tint
+    let rowHasShortage = false;
+    for (const sc of statusCols) {
+      const sRef = XLSX.utils.encode_cell({ r, c: sc });
+      const sVal = String(ws[sRef]?.v ?? '');
+      if (sVal.includes('THIẾU') || sVal.includes('HẾT') || sVal.includes('LỆCH')) {
+        rowHasShortage = true;
+      }
+    }
+    const zebra = rowHasShortage
+      ? 'FFF1F2'
+      : (r - headerRowIdx) % 2 === 1
+      ? 'FFFFFF'
+      : 'F8FAFC';
+
     for (let c = 0; c < totalCols; c++) {
       const ref = XLSX.utils.encode_cell({ r, c });
       const val = String(ws[ref]?.v ?? '');
@@ -1057,17 +806,12 @@ function styleStandardDataSheet(
       let fg = '0F172A';
       let bold = false;
 
-      if (isBin) {
-        bg = 'FEF3C7';
-        fg = '92400E';
-        bold = true;
-      } else if (isStatus) {
+      if (isStatus) {
         if (val.includes('THIẾU') || val.includes('HẾT') || val.includes('LỆCH')) {
           bg = 'FEE2E2';
           fg = 'B91C1C';
           bold = true;
         } else if (val.includes('ĐỦ') || val.includes('CÂN BẰNG')) {
-          bg = 'DCFCE7';
           fg = '15803D';
           bold = true;
         }
@@ -1079,7 +823,7 @@ function styleStandardDataSheet(
 
       setCellStyle(ws, r, c, {
         fill: { fgColor: { rgb: bg } },
-        font: { name: 'Arial', sz: 9, bold, color: { rgb: fg } },
+        font: { name: 'Arial', sz: 9.5, bold, color: { rgb: fg } },
         border: THIN_BORDER,
         alignment: {
           horizontal: isStatus || c === 0 ? 'center' : isNum ? 'right' : 'left',
@@ -1100,8 +844,8 @@ function styleStandardDataSheet(
 }
 
 /**
- * Exports an Excel workbook where Sheet 1 is the Master Container Summary,
- * and EVERY Container has its own dedicated worksheet named after its PO & SO!
+ * Exports a clean Excel workbook where Sheet 1 is the Master Container Summary,
+ * and EVERY Container has its own dedicated worksheet named after its PO & SO.
  */
 export function exportContainersByPoSoToExcel(
   poSummaries: ReconciledPoSummary[],
@@ -1110,7 +854,7 @@ export function exportContainersByPoSoToExcel(
 ) {
   const wb = XLSX.utils.book_new();
 
-  // Sheet 1: Master Summary of all Containers (SO & PO)
+  // Sheet 1: Clean Master Summary of all Containers (SO & PO)
   const summaryRows: any[][] = [
     [`BÁO CÁO TỔNG HỢP THEO TỪNG CONT XUẤT (PO & SO) — ${activePlanName.toUpperCase()}`],
     [
@@ -1118,8 +862,8 @@ export function exportContainersByPoSoToExcel(
       new Date().toLocaleString('vi-VN'),
       'Chế độ tính:',
       allocationMode === 'direct'
-        ? 'Tính riêng từng Cont theo SO & PO (Độc lập với Kho 01 + Kho 60)'
-        : 'Tính lũy kế FIFO theo thứ tự Cont xuất'
+        ? 'Tính độc lập từng Cont (Kho 01 + Kho 60)'
+        : 'Tính lũy kế FIFO theo thứ tự Cont'
     ],
     [],
     [
@@ -1127,28 +871,26 @@ export function exportContainersByPoSoToExcel(
       'Cont #',
       'Số PO',
       'Số SO',
-      'Tên Sheet Chi Tiết',
       'Khách Hàng',
-      'Ngày Xuất Dự Kiến',
-      'Tổng Số Mã',
-      'Số Mã Đủ',
+      'Ngày Đóng Cont',
+      'Số Mã Hàng',
       'Số Mã Thiếu',
-      'Tổng SL Cont (Pcs)',
+      'Tổng SL Xuất (Pcs)',
       'SL Đáp Ứng (Pcs)',
-      'SL Thiếu Hụt (Pcs)',
-      'Số Kiện (#pkg)',
+      'SL Thiếu (Pcs)',
+      'Số Kiện (#Pkg - Cặp)',
       'Tổng CBM',
       'Trạng Thái Cont',
-      'Chi Tiết Thiếu Những Mã Nào & Số Lượng Bao Nhiêu'
+      'Chi Tiết Mã Thiếu & Số Lượng Thiếu'
     ]
   ];
 
   poSummaries.forEach((p, idx) => {
     const missingDetail =
       p.shortageLines.length === 0
-        ? 'Đủ hàng 100% (Không thiếu mã nào)'
+        ? 'Đủ hàng 100%'
         : p.shortageLines
-            .map((l) => `${l.itemCode} (Cần ${l.qty}, Tồn ${l.stockBeforeLine} -> Thiếu -${l.shortageQty})`)
+            .map((l) => `${l.itemCode} (Thiếu -${l.shortageQty.toLocaleString('en-US')} pcs)`)
             .join(' | ');
 
     summaryRows.push([
@@ -1156,51 +898,47 @@ export function exportContainersByPoSoToExcel(
       `Cont #${String(p.containerIndex).padStart(2, '0')}`,
       p.po,
       p.so || p.soList.join(', '),
-      p.sheetNameExcel,
       p.customer,
       p.loadingDate,
       p.totalLines,
-      p.fulfilledLinesCount,
       p.shortageLinesCount,
       p.totalRequiredQty,
       p.totalAllocatedQty,
       p.totalShortageQty,
       p.totalPkgs,
       Number(p.totalCbm.toFixed(2)),
-      p.status === 'FULFILLED' ? 'ĐỦ HÀNG XUẤT 100%' : `THIẾU ${p.shortageLinesCount} MÃ`,
+      p.status === 'FULFILLED' ? 'ĐỦ HÀNG 100%' : `THIẾU ${p.shortageLinesCount} MÃ`,
       missingDetail
     ]);
   });
 
   const wsSummary = XLSX.utils.aoa_to_sheet(summaryRows);
-  wsSummary['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 16 } }];
-  wsSummary['!rows'] = [{ hpt: 30 }, { hpt: 20 }, { hpt: 10 }, { hpt: 28 }];
+  wsSummary['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 14 } }];
+  wsSummary['!rows'] = [{ hpt: 28 }, { hpt: 20 }, { hpt: 8 }, { hpt: 26 }];
   wsSummary['!cols'] = [
     { wch: 6 },
     { wch: 11 },
+    { wch: 16 },
+    { wch: 15 },
     { wch: 18 },
-    { wch: 16 },
-    { wch: 24 },
-    { wch: 20 },
     { wch: 14 },
     { wch: 12 },
     { wch: 12 },
-    { wch: 12 },
-    { wch: 16 },
     { wch: 16 },
     { wch: 16 },
     { wch: 14 },
+    { wch: 16 },
     { wch: 12 },
-    { wch: 20 },
-    { wch: 80 }
+    { wch: 18 },
+    { wch: 64 }
   ];
-  styleStandardDataSheet(wsSummary, 3, 17, summaryRows.length, {
+  styleStandardDataSheet(wsSummary, 3, 15, summaryRows.length, {
     titleBanner: true,
-    bannerBg: '0F172A',
+    bannerBg: '1E3A8A',
     headerBg: '1E3A8A',
-    statusColIndices: [15],
-    shortageColIndices: [9, 12],
-    numberColIndices: [7, 8, 9, 10, 11, 12, 13]
+    statusColIndices: [13],
+    shortageColIndices: [7, 10],
+    numberColIndices: [6, 7, 8, 9, 10, 11]
   });
   XLSX.utils.book_append_sheet(wb, wsSummary, '00_TONG_HOP_CONT');
 
@@ -1234,20 +972,20 @@ export function exportFullReconciliationToExcel(
   const wb = XLSX.utils.book_new();
   const stockByCode = new Map(stockItems.map((s) => [s.code.trim(), s]));
 
-  // Sheet 1: Executive KPI & Multi-Agent Audit Summary
+  // Sheet 1: Clean Executive KPI Summary
   const kpiRows = [
-    ['BÁO CÁO ĐỐI SOÁT TỒN KHO (KHO 01 & 60) & KẾ HOẠCH XUẤT HÀNG CONTAINER'],
+    ['BÁO CÁO ĐỐI SOÁT TỒN KHO (KHO 01 & 60) & KẾ HOẠCH XUẤT CONTAINER'],
     ['Thời gian xuất báo cáo:', new Date().toLocaleString('vi-VN'), ''],
     ['Kế hoạch đang đối soát:', activePlanName, ''],
     [
       'Chế độ phân bổ tồn kho:',
       allocationMode === 'fifo'
-        ? 'Phân bổ lũy kế FIFO (Kho 60 -> Kho 01 theo thứ tự Cont/Lịch xuất)'
-        : 'Tính riêng độc lập từng Cont (SO & PO) với Tổng Tồn (Kho 01 + Kho 60)',
+        ? 'Phân bổ lũy kế FIFO theo thứ tự Cont xuất'
+        : 'Tính độc lập từng Cont (SO & PO) với Tổng Tồn (Kho 01 + Kho 60)',
       ''
     ],
     [],
-    ['CHỈ SỐ KPI TỔNG HỢP', 'GIÁ TRỊ', 'GHI CHÚ ĐỐI SOÁT AGENT'],
+    ['CHỈ SỐ TỔNG HỢP', 'GIÁ TRỊ', 'GHI CHÚ CHI TIẾT'],
     [
       'Tổng Tồn Kho (Kho 01 + Kho 60)',
       stockItems.reduce((a, b) => a + b.totalQty, 0),
@@ -1256,7 +994,7 @@ export function exportFullReconciliationToExcel(
     [
       'Tồn Kho 01',
       stockItems.reduce((a, b) => a + b.wh01Qty, 0),
-      `${stockItems.filter((x) => x.wh01Qty > 0).length} mã hàng tại Kho 01 (Đầu 3* chỉ lấy Phụ kiện)`
+      `${stockItems.filter((x) => x.wh01Qty > 0).length} mã hàng tại Kho 01`
     ],
     [
       'Tồn Kho 60',
@@ -1264,37 +1002,26 @@ export function exportFullReconciliationToExcel(
       `${stockItems.filter((x) => x.wh60Qty > 0).length} mã hàng tại Kho 60`
     ],
     [
-      'Tồn Kho Thành Phẩm (Đầu 8 - Trái/Phải)',
-      stockItems.filter((x) => x.isFinishedGood).reduce((a, b) => a + b.totalQty, 0),
-      `${lrPairs.filter((x) => x.isFinishedGood).length} cặp mẫu (${lrPairs.filter((x) => x.isFinishedGood && x.isBalanced).length} cân bằng, ${lrPairs.filter((x) => x.isFinishedGood && !x.isBalanced).length} lệch cặp)`
-    ],
-    ['Tổng Dòng Đơn Hàng Xuất', reconciliation.metrics.totalOrderLines, ''],
-    [
-      'Số Dòng Đủ Hàng Xuất (100%)',
-      reconciliation.metrics.fulfilledLinesCount,
-      `${((reconciliation.metrics.fulfilledLinesCount / Math.max(1, reconciliation.metrics.totalOrderLines)) * 100).toFixed(1)}% tổng dòng`
-    ],
-    [
-      'Số Dòng Thiếu Hàng (Shortage)',
-      reconciliation.metrics.shortageLinesCount,
-      `Trong đó ${reconciliation.metrics.partialStockLinesCount} dòng đủ 1 phần, ${reconciliation.metrics.zeroStockLinesCount} dòng tồn = 0`
-    ],
-    [
       'Tổng Số Cont (PO & SO)',
       reconciliation.metrics.totalPos,
       `Đủ 100%: ${reconciliation.metrics.fulfilledPosCount} Cont | Thiếu hàng: ${reconciliation.metrics.shortagePosCount} Cont`
     ],
+    [
+      'Tổng Số Kiện Xuất (#Pkg - Theo Cặp Trái/Phải)',
+      reconciliation.metrics.totalPkgs,
+      'Đã giữ nguyên số kiện theo cặp Trái/Phải (không cộng đúp)'
+    ],
     ['Tổng Số Lượng Cần Xuất (Pcs)', reconciliation.metrics.totalRequiredQty, ''],
-    ['Tổng Số Lượng Đáp Ứng Từ Kho 01+60 (Pcs)', reconciliation.metrics.totalAllocatedQty, ''],
-    ['Tổng Số Lượng Thiếu Hụt (Shortage Pcs)', reconciliation.metrics.totalShortageQty, '']
+    ['Tổng Số Lượng Đáp Ứng (Pcs)', reconciliation.metrics.totalAllocatedQty, ''],
+    ['Tổng Số Lượng Thiếu Hụt (Pcs)', reconciliation.metrics.totalShortageQty, '']
   ];
   const wsKpi = XLSX.utils.aoa_to_sheet(kpiRows);
   wsKpi['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 2 } }];
-  wsKpi['!cols'] = [{ wch: 44 }, { wch: 24 }, { wch: 58 }];
+  wsKpi['!cols'] = [{ wch: 44 }, { wch: 22 }, { wch: 56 }];
   styleStandardDataSheet(wsKpi, 5, 3, kpiRows.length, {
     titleBanner: true,
-    bannerBg: '0F172A',
-    headerBg: '0F766E',
+    bannerBg: '1E3A8A',
+    headerBg: '1E3A8A',
     numberColIndices: [1]
   });
   XLSX.utils.book_append_sheet(wb, wsKpi, '01_Tong_Hop_KPI');
@@ -1305,20 +1032,20 @@ export function exportFullReconciliationToExcel(
     'Cont #': `Cont #${String(p.containerIndex).padStart(2, '0')}`,
     'Số PO': p.po,
     'Số SO': p.so || p.soList.join(', '),
-    'Sheet PO&SO': p.sheetNameExcel,
     'Khách Hàng': p.customer,
-    'Ngày Xuất Dự Kiến': p.loadingDate,
-    'Tổng Số Mã': p.totalLines,
-    'Số Mã Đủ': p.fulfilledLinesCount,
+    'Ngày Đóng Cont': p.loadingDate,
+    'Số Mã Hàng': p.totalLines,
     'Số Mã Thiếu': p.shortageLinesCount,
-    'Tổng SL Cần Xuất': p.totalRequiredQty,
-    'Tổng SL Đáp Ứng': p.totalAllocatedQty,
-    'Tổng SL Thiếu': p.totalShortageQty,
+    'Tổng SL Xuất (Pcs)': p.totalRequiredQty,
+    'SL Đáp Ứng (Pcs)': p.totalAllocatedQty,
+    'SL Thiếu (Pcs)': p.totalShortageQty,
+    'Số Kiện (#Pkg - Cặp)': p.totalPkgs,
+    'Tổng CBM': Number(p.totalCbm.toFixed(2)),
+    'Trạng Thái Cont': p.status === 'FULFILLED' ? 'ĐỦ HÀNG 100%' : `THIẾU ${p.shortageLinesCount} MÃ`,
     'Chi Tiết Mã Thiếu & SL Thiếu':
       p.shortageLines.length === 0
         ? 'Đủ 100%'
-        : p.shortageLines.map((l) => `${l.itemCode} (-${l.shortageQty})`).join(', '),
-    'Trạng Thái Cont': p.status === 'FULFILLED' ? 'ĐỦ HÀNG XUẤT 100%' : 'THIẾU HÀNG'
+        : p.shortageLines.map((l) => `${l.itemCode} (-${l.shortageQty})`).join(', ')
   }));
   const wsPo = XLSX.utils.json_to_sheet(poData);
   wsPo['!cols'] = [
@@ -1326,184 +1053,163 @@ export function exportFullReconciliationToExcel(
     { wch: 11 },
     { wch: 16 },
     { wch: 15 },
-    { wch: 22 },
     { wch: 18 },
     { wch: 14 },
     { wch: 12 },
-    { wch: 11 },
     { wch: 12 },
     { wch: 16 },
     { wch: 16 },
     { wch: 14 },
-    { wch: 48 },
-    { wch: 20 }
+    { wch: 16 },
+    { wch: 12 },
+    { wch: 18 },
+    { wch: 52 }
   ];
   styleStandardDataSheet(wsPo, 0, 15, poData.length + 1, {
     headerBg: '1E3A8A',
-    statusColIndices: [14],
-    shortageColIndices: [9, 12],
-    numberColIndices: [7, 8, 9, 10, 11, 12]
+    statusColIndices: [13],
+    shortageColIndices: [7, 10],
+    numberColIndices: [6, 7, 8, 9, 10, 11]
   });
   XLSX.utils.book_append_sheet(wb, wsPo, '02_Tong_Hop_Tung_Cont');
 
-  // Sheet 3: Đơn Đủ Hàng Xuất (Kèm Vị Trí Bin Lấy Hàng)
+  // Sheet 3: Đơn Đủ Hàng Xuất (Gọn, rõ ràng)
   const fulfilledData = reconciliation.fulfilledLines.map((l, idx) => ({
     STT: idx + 1,
     'Cont #': `Cont #${String(l.containerIndex).padStart(2, '0')}`,
-    'Khách Hàng': l.customer,
     SO: l.so,
     PO: l.po,
-    'Mã Hàng (LPVN Code)': l.itemCode,
-    'Model/Feature': l.feature,
-    'Phân Loại Bên': l.side === 'L' ? 'Trái (LHF)' : l.side === 'R' ? 'Phải (RHF)' : 'Chung',
+    'Mã Hàng (Item Code)': l.itemCode,
+    Model: l.feature,
+    'Bên (Trái/Phải)': l.side === 'L' ? 'Trái (L)' : l.side === 'R' ? 'Phải (R)' : 'Chung',
     'Mô Tả Hàng Hóa': l.description,
-    'Ngày Xuất (Loading Date)': l.updatedLoadingDate || l.loadingDate || l.crd,
-    'SL Đặt Xuất (Qty)': l.qty,
-    'Tồn Đầu Kho 01': l.wh01Initial,
-    'Tồn Đầu Kho 60': l.wh60Initial,
-    'Lấy Tại Kho 60': l.allocatedWh60,
-    'Lấy Tại Kho 01': l.allocatedWh01,
-    'SL Phân Bổ (01+60)': l.allocatedTotal,
-    'Vị Trí Bin Gợi Ý Lấy Hàng (Kho 60 / Kho 01)':
+    'SL Xuất (Pcs)': l.qty,
+    'Số Kiện (#Pkg - Cặp)': l.isPairedPkgSecondRow ? '' : l.pairPkgs ?? l.pkgs,
+    'Tồn Kho 01': l.wh01Initial,
+    'Tồn Kho 60': l.wh60Initial,
+    'Tổng Tồn (01+60)': l.stockBeforeLine,
+    'Vị Trí Bin Lấy Hàng (Kho 60 / Kho 01)':
       l.pickingBinsText || (l.bins?.length ? l.bins.join(', ') : 'Không có Bin'),
-    'Toàn Bộ Vị Trí Bin Đang Tồn':
-      l.allBinsText || (l.bins?.length ? l.bins.join(', ') : 'Không có Bin'),
-    'Trạng Thái': 'ĐỦ HÀNG XUẤT (100%)'
+    'Trạng Thái': 'ĐỦ HÀNG'
   }));
   const wsFulfilled = XLSX.utils.json_to_sheet(fulfilledData);
   wsFulfilled['!cols'] = [
     { wch: 6 },
     { wch: 10 },
-    { wch: 16 },
     { wch: 14 },
     { wch: 15 },
-    { wch: 16 },
+    { wch: 15 },
+    { wch: 10 },
     { wch: 12 },
-    { wch: 13 },
     { wch: 26 },
     { wch: 13 },
+    { wch: 15 },
+    { wch: 12 },
+    { wch: 12 },
     { wch: 14 },
-    { wch: 13 },
-    { wch: 13 },
-    { wch: 13 },
-    { wch: 13 },
-    { wch: 14 },
-    { wch: 36 },
-    { wch: 36 },
-    { wch: 20 }
+    { wch: 42 },
+    { wch: 14 }
   ];
-  styleStandardDataSheet(wsFulfilled, 0, 19, fulfilledData.length + 1, {
-    headerBg: '065F46',
-    binColIndices: [16, 17],
-    statusColIndices: [18],
-    numberColIndices: [10, 11, 12, 13, 14, 15]
+  styleStandardDataSheet(wsFulfilled, 0, 15, fulfilledData.length + 1, {
+    headerBg: '1E3A8A',
+    binColIndices: [13],
+    statusColIndices: [14],
+    numberColIndices: [8, 9, 10, 11, 12]
   });
   XLSX.utils.book_append_sheet(wb, wsFulfilled, '03_Don_Du_Hang_Xuat');
 
-  // Sheet 4: Đơn Thiếu Hàng (Kèm Vị Trí Bin Tồn Hiện Có)
+  // Sheet 4: Đơn Thiếu Hàng (Tập trung vào số lượng thiếu & tồn hiện có)
   const shortageData = reconciliation.shortageLines.map((l, idx) => ({
     STT: idx + 1,
     'Cont #': `Cont #${String(l.containerIndex).padStart(2, '0')}`,
-    'Khách Hàng': l.customer,
     SO: l.so,
     PO: l.po,
-    'Mã Hàng (LPVN Code)': l.itemCode,
-    'Model/Feature': l.feature,
-    'Phân Loại Bên': l.side === 'L' ? 'Trái (LHF)' : l.side === 'R' ? 'Phải (RHF)' : 'Chung',
+    'Mã Hàng (Item Code)': l.itemCode,
+    Model: l.feature,
+    'Bên (Trái/Phải)': l.side === 'L' ? 'Trái (L)' : l.side === 'R' ? 'Phải (R)' : 'Chung',
     'Mô Tả Hàng Hóa': l.description,
-    'Ngày Xuất (Loading Date)': l.updatedLoadingDate || l.loadingDate || l.crd,
-    'SL Cần Xuất (Qty)': l.qty,
-    'Tồn Đầu Kho 01': l.wh01Initial,
-    'Tồn Đầu Kho 60': l.wh60Initial,
-    'Tồn Khả Dụng (01+60)': l.stockBeforeLine,
-    'SL Đáp Ứng Được': l.allocatedTotal,
-    'SL THIẾU HỤT (Shortage)': l.shortageQty,
+    'SL Xuất (Pcs)': l.qty,
+    'Số Kiện (#Pkg - Cặp)': l.pairPkgs ?? l.pkgs,
+    'Tồn Kho 01': l.wh01Initial,
+    'Tồn Kho 60': l.wh60Initial,
+    'Tổng Tồn (01+60)': l.stockBeforeLine,
+    'SL THIẾU (Pcs)': l.shortageQty,
     'Vị Trí Bin Phần Tồn Hiện Có':
       l.pickingBinsText || l.allBinsText || 'Hết tồn kho (Không có Bin)',
-    'Mức Độ Thiếu':
-      l.fulfillmentStatus === 'ZERO_STOCK' ? 'HẾT TỒN KHO 01+60 (0 Pcs)' : 'THIẾU MỘT PHẦN'
+    'Trạng Thái':
+      l.fulfillmentStatus === 'ZERO_STOCK' ? 'HẾT TỒN KHO (0 Pcs)' : `THIẾU -${l.shortageQty}`
   }));
   const wsShortage = XLSX.utils.json_to_sheet(shortageData);
   wsShortage['!cols'] = [
     { wch: 6 },
     { wch: 10 },
-    { wch: 16 },
     { wch: 14 },
     { wch: 15 },
-    { wch: 16 },
+    { wch: 15 },
+    { wch: 10 },
     { wch: 12 },
-    { wch: 13 },
     { wch: 26 },
     { wch: 13 },
-    { wch: 14 },
-    { wch: 13 },
-    { wch: 13 },
     { wch: 15 },
+    { wch: 12 },
+    { wch: 12 },
     { wch: 14 },
-    { wch: 16 },
-    { wch: 36 },
-    { wch: 22 }
+    { wch: 14 },
+    { wch: 40 },
+    { wch: 18 }
   ];
-  styleStandardDataSheet(wsShortage, 0, 18, shortageData.length + 1, {
-    headerBg: '991B1B',
-    binColIndices: [16],
-    statusColIndices: [17],
-    shortageColIndices: [15],
-    numberColIndices: [10, 11, 12, 13, 14, 15]
+  styleStandardDataSheet(wsShortage, 0, 16, shortageData.length + 1, {
+    headerBg: '1E3A8A',
+    binColIndices: [14],
+    statusColIndices: [15],
+    shortageColIndices: [13],
+    numberColIndices: [8, 9, 10, 11, 12, 13]
   });
   XLSX.utils.book_append_sheet(wb, wsShortage, '04_Don_Hang_Thieu');
 
-  // Sheet 5: Báo Cáo Tồn Kho Thành Phẩm Trái/Phải (Kho 01 & 60) Kèm Vị Trí Bin
+  // Sheet 5: Báo Cáo Tồn Kho Thành Phẩm Trái/Phải (Kho 01 & 60)
   const lrData = lrPairs.map((p, idx) => {
     const leftBins = stockByCode.get(p.leftCode)?.bins?.join(', ') || '';
     const rightBins = stockByCode.get(p.rightCode)?.bins?.join(', ') || '';
     return {
       STT: idx + 1,
-      'Model / Feature': p.model,
+      Model: p.model,
       'Mô Tả': p.description,
       'Mã Trái (LHF)': p.leftCode,
-      'Trái - Kho 01': p.leftWh01,
-      'Trái - Kho 60': p.leftWh60,
       'Tổng Trái (01+60)': p.leftTotal,
-      'Vị Trí Bin Bên Trái (LHF)': leftBins,
+      'Bin Bên Trái': leftBins,
       'Mã Phải (RHF)': p.rightCode,
-      'Phải - Kho 01': p.rightWh01,
-      'Phải - Kho 60': p.rightWh60,
       'Tổng Phải (01+60)': p.rightTotal,
-      'Vị Trí Bin Bên Phải (RHF)': rightBins,
+      'Bin Bên Phải': rightBins,
       'Số Bộ Ghép Đôi (Sets)': p.matchedSets,
-      'Chênh Lệch (Trái - Phải)': p.diffLR,
-      'Trạng Thái Cặp': p.isBalanced ? 'CÂN BẰNG 100%' : `LỆCH CẶP (${p.diffLR > 0 ? '+' : ''}${p.diffLR})`
+      'Lệch (Trái - Phải)': p.diffLR,
+      'Trạng Thái Cặp': p.isBalanced ? 'CÂN BẰNG' : `LỆCH (${p.diffLR > 0 ? '+' : ''}${p.diffLR})`
     };
   });
   const wsLr = XLSX.utils.json_to_sheet(lrData);
   wsLr['!cols'] = [
     { wch: 6 },
-    { wch: 12 },
+    { wch: 10 },
     { wch: 24 },
     { wch: 15 },
-    { wch: 12 },
-    { wch: 12 },
-    { wch: 14 },
-    { wch: 32 },
     { wch: 15 },
-    { wch: 12 },
-    { wch: 12 },
-    { wch: 14 },
-    { wch: 32 },
-    { wch: 14 },
+    { wch: 30 },
     { wch: 15 },
-    { wch: 18 }
+    { wch: 15 },
+    { wch: 30 },
+    { wch: 16 },
+    { wch: 15 },
+    { wch: 16 }
   ];
-  styleStandardDataSheet(wsLr, 0, 16, lrData.length + 1, {
+  styleStandardDataSheet(wsLr, 0, 12, lrData.length + 1, {
     headerBg: '1E3A8A',
-    binColIndices: [7, 12],
-    statusColIndices: [15],
-    numberColIndices: [4, 5, 6, 9, 10, 11, 13, 14]
+    binColIndices: [5, 8],
+    statusColIndices: [11],
+    numberColIndices: [4, 7, 9, 10]
   });
   XLSX.utils.book_append_sheet(wb, wsLr, '05_Ton_Kho_Trai_Phai');
 
-  // Append individual sheets for each Container (PO & SO) right into the workbook as well!
+  // Append individual sheets for each Container (PO & SO)
   for (const poGroup of reconciliation.poSummaries) {
     const wsCont = buildContainerPoSoWorksheet(poGroup, allocationMode);
     XLSX.utils.book_append_sheet(wb, wsCont, poGroup.sheetNameExcel);

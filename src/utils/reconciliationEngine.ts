@@ -317,7 +317,59 @@ export function reconcileShipmentPlan(
 
     const reconciledGroupLines: ReconciledOrderLine[] = [];
 
-    for (const line of groupLines) {
+    for (let idx = 0; idx < groupLines.length; idx++) {
+      const rawLine = groupLines[idx];
+      let line = rawLine;
+
+      // Đảm bảo số kiện (#pkg) luôn giữ nguyên theo cặp Trái/Phải, không cộng đúp Trái riêng Phải riêng
+      if (
+        rawLine.pairPkgs === undefined &&
+        rawLine.isPairedPkgHead === undefined &&
+        rawLine.isPairedPkgSecondRow === undefined
+      ) {
+        const nextLine = groupLines[idx + 1];
+        const prevRec = reconciledGroupLines[reconciledGroupLines.length - 1];
+        if (
+          prevRec &&
+          prevRec.isPairedPkgHead &&
+          prevRec.po === rawLine.po &&
+          prevRec.feature === rawLine.feature &&
+          (rawLine.side === 'L' || rawLine.side === 'R') &&
+          prevRec.side !== rawLine.side
+        ) {
+          line = {
+            ...rawLine,
+            pkgs: 0,
+            pairPkgs: prevRec.pairPkgs ?? prevRec.pkgs,
+            isPairedPkgHead: false,
+            isPairedPkgSecondRow: true
+          };
+        } else if (
+          nextLine &&
+          (rawLine.side === 'L' || rawLine.side === 'R') &&
+          (nextLine.side === 'L' || nextLine.side === 'R') &&
+          rawLine.side !== nextLine.side &&
+          rawLine.po === nextLine.po &&
+          rawLine.feature === nextLine.feature
+        ) {
+          const pairPkg = rawLine.pkgs > 0 ? rawLine.pkgs : nextLine.pkgs;
+          line = {
+            ...rawLine,
+            pkgs: pairPkg,
+            pairPkgs: pairPkg,
+            isPairedPkgHead: true,
+            isPairedPkgSecondRow: false
+          };
+        } else {
+          line = {
+            ...rawLine,
+            pairPkgs: rawLine.pkgs,
+            isPairedPkgHead: false,
+            isPairedPkgSecondRow: false
+          };
+        }
+      }
+
       const code = line.itemCode.trim();
       const init = stockMap.get(code) || { wh01: 0, wh60: 0, total: 0 };
       const reqQty = line.qty;

@@ -444,8 +444,8 @@ export const FulfillmentReportSection: React.FC<FulfillmentReportSectionProps> =
                         </div>
                         <div className="mt-0.5 text-xs text-slate-300">
                           Khách hàng: <strong className="text-white">{poGroup.customer}</strong> • Ngày đóng Cont:{' '}
-                          <strong className="font-mono text-cyan-300">{poGroup.loadingDate || 'Chưa cập nhật'}</strong> • Tổng kiện:{' '}
-                          <strong className="font-mono text-white">{poGroup.totalPkgs.toLocaleString('en-US')} pkg</strong> • Thể tích:{' '}
+                          <strong className="font-mono text-cyan-300">{poGroup.loadingDate || 'Chưa cập nhật'}</strong> • Tổng kiện (theo cặp Trái/Phải):{' '}
+                          <strong className="font-mono text-amber-300">{poGroup.totalPkgs.toLocaleString('en-US')} pkg</strong> • Thể tích:{' '}
                           <strong className="font-mono text-white">{poGroup.totalCbm.toFixed(2)} CBM</strong>
                         </div>
                       </div>
@@ -565,6 +565,7 @@ export const FulfillmentReportSection: React.FC<FulfillmentReportSectionProps> =
                             <th className="py-2 px-3">Model / Bên</th>
                             <th className="py-2 px-3">Mô Tả Hàng Hóa</th>
                             <th className="py-2 px-3 text-right">SL Cont Cần</th>
+                            <th className="py-2 px-3 text-center text-amber-300">Số Kiện (#Pkg - Cặp)</th>
                             <th className="py-2 px-3 text-right text-blue-300">Kho 01</th>
                             <th className="py-2 px-3 text-right text-cyan-300">Kho 60</th>
                             <th className="py-2 px-3 text-right">Tồn Khả Dụng</th>
@@ -610,6 +611,28 @@ export const FulfillmentReportSection: React.FC<FulfillmentReportSectionProps> =
                               <td className="py-2 px-3 text-right font-bold text-white">
                                 {l.qty.toLocaleString('en-US')}
                               </td>
+                              {!l.isPairedPkgSecondRow && (
+                                <td
+                                  rowSpan={l.isPairedPkgHead ? 2 : 1}
+                                  className={`py-2 px-3 text-center font-bold align-middle ${
+                                    l.isPairedPkgHead
+                                      ? 'bg-slate-950/60 border-x border-slate-800 text-amber-300'
+                                      : 'text-slate-200'
+                                  }`}
+                                  title={
+                                    l.isPairedPkgHead
+                                      ? 'Số kiện (#pkg) đã tính chung cho cặp Trái + Phải'
+                                      : undefined
+                                  }
+                                >
+                                  {(l.pairPkgs ?? l.pkgs).toLocaleString('en-US')}
+                                  {l.isPairedPkgHead && (
+                                    <span className="block text-[10px] font-sans font-normal text-slate-400">
+                                      (Cặp T/P)
+                                    </span>
+                                  )}
+                                </td>
+                              )}
                               <td className="py-2 px-3 text-right text-blue-300">
                                 {l.wh01Initial.toLocaleString('en-US')}
                               </td>

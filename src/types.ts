@@ -66,6 +66,9 @@ export interface ShipmentLine {
   unitWeight: number;
   pcsPerPkg: number;
   pkgs: number;
+  pairPkgs?: number;
+  isPairedPkgHead?: boolean;
+  isPairedPkgSecondRow?: boolean;
   netWeight: number;
   grossWeight: number;
   cbm: number;
