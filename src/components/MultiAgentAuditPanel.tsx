@@ -9,7 +9,8 @@ import {
   Cpu,
   Database,
   Scale,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Upload
 } from 'lucide-react';
 import { LeftRightPair, StockItem } from '../types';
 import { ReconciliationResult } from '../utils/reconciliationEngine';
@@ -21,6 +22,8 @@ interface MultiAgentAuditPanelProps {
   activePlanName: string;
   lastVerifiedAt: string;
   onRunAuditAgain: () => void;
+  onTriggerStockUpload?: () => void;
+  activeStockFileName?: string;
 }
 
 export const MultiAgentAuditPanel: React.FC<MultiAgentAuditPanelProps> = ({
@@ -29,7 +32,9 @@ export const MultiAgentAuditPanel: React.FC<MultiAgentAuditPanelProps> = ({
   reconciliation,
   activePlanName,
   lastVerifiedAt,
-  onRunAuditAgain
+  onRunAuditAgain,
+  onTriggerStockUpload,
+  activeStockFileName = 'Stock list.xlsx'
 }) => {
   const [expanded, setExpanded] = useState(false);
   const [isAuditing, setIsAuditing] = useState(false);
@@ -67,12 +72,22 @@ export const MultiAgentAuditPanel: React.FC<MultiAgentAuditPanelProps> = ({
               </span>
             </div>
             <p className="text-xs text-slate-400">
-              Không tự ý suy đoán — Mọi con số tồn kho Kho 01 & 60, cặp Trái/Phải và thiếu hụt đều được đối soát chéo qua 4 Agent độc lập • Cập nhật lúc: {lastVerifiedAt}
+              File tồn kho đang đối soát: <strong className="text-cyan-300">{activeStockFileName}</strong> — Mọi con số tồn kho Kho 01 & 60, cặp Trái/Phải và thiếu hụt đều được đối soát chéo qua 4 Agent độc lập • Cập nhật lúc: {lastVerifiedAt}
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {onTriggerStockUpload && (
+            <button
+              onClick={onTriggerStockUpload}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-cyan-400 to-sky-500 px-3.5 py-1.5 text-xs font-extrabold text-slate-950 shadow-md shadow-cyan-500/20 hover:brightness-110 transition cursor-pointer"
+              title="Chọn file tồn kho (Stock list.xlsx) từ máy tính để tính đối soát ngay"
+            >
+              <Upload className="h-3.5 w-3.5" />
+              <span>Nhập Tồn Kho & Tính Đối Soát</span>
+            </button>
+          )}
           <button
             onClick={handleRunAudit}
             disabled={isAuditing}

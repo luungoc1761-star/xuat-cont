@@ -3,14 +3,12 @@ import {
   Boxes,
   Upload,
   Download,
-  Cloud,
   Calendar,
   CalendarDays,
-  Layers,
-  Radio,
-  Sparkles,
   RefreshCw,
-  CheckCircle2
+  CheckCircle2,
+  Calculator,
+  Database
 } from 'lucide-react';
 import {
   AllocationMode,
@@ -41,11 +39,13 @@ import { DataImportAndOneDriveModal } from './components/DataImportAndOneDriveMo
 
 export function App() {
   const [loading, setLoading] = useState(true);
+  const [isReconcilingStock, setIsReconcilingStock] = useState(false);
   const [stockItems, setStockItems] = useState<StockItem[]>([]);
   const [lrPairs, setLrPairs] = useState<LeftRightPair[]>([]);
   const [plans, setPlans] = useState<Record<string, PlanDataset>>({});
   const [activePlanKey, setActivePlanKey] = useState<string>('NOV-full');
   const [allocationMode, setAllocationMode] = useState<AllocationMode>('direct');
+  const [activeStockFileName, setActiveStockFileName] = useState<string>('Stock list.xlsx');
 
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [filterMode3D, setFilterMode3D] = useState<
@@ -60,7 +60,7 @@ export function App() {
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [lastVerifiedAt, setLastVerifiedAt] = useState<string>('');
   const [lastSyncLog, setLastSyncLog] = useState<string>(
-    'Đã tải và đối soát chuẩn xác Stock list.xlsx (Kho 01 & 60) + NOV. SHIPMENT -OCT22.xlsx trên Repo'
+    'Đã tải và đối soát chuẩn xác Stock list.xlsx (Kho 01 & 60) + NOV. SHIPMENT -OCT22.xlsx'
   );
   const [exportedHistory, setExportedHistory] = useState<
     Array<{
@@ -75,17 +75,16 @@ export function App() {
     }>
   >([]);
 
+  // Persistent metadata map and base plans reference
+  const masterMetaMapRef = useRef<
+    Map<string, { feature: string; description: string; customerCode: string }>
+  >(new Map());
+  const basePlansRef = useRef<Record<string, PlanDataset>>({});
+
   // Quick inline file inputs in header
   const quickStockInputRef = useRef<HTMLInputElement | null>(null);
   const quickMonthlyInputRef = useRef<HTMLInputElement | null>(null);
   const quickWeeklyInputRef = useRef<HTMLInputElement | null>(null);
-
-  // Browser File System Access API live watcher state for OneDrive Stock list.xlsx
-  const [liveWatchActive, setLiveWatchActive] = useState(false);
-  const [liveWatchFileName, setLiveWatchFileName] = useState<string | null>(null);
-  const fileHandleRef = useRef<any>(null);
-  const lastModifiedRef = useRef<number>(0);
-  const watchTimerRef = useRef<number | null>(null);
 
   // Load initial verified dataset
   const loadInitialDataset = async () => {
@@ -98,6 +97,30 @@ export function App() {
         }
         return true;
       });
+
+      // Populate persistent metadata map
+      const m = new Map(masterMetaMapRef.current);
+      for (const s of payload.stockItems) {
+        m.set(s.code, {
+          feature: s.feature,
+          description: s.description,
+          customerCode: s.customerCode
+        });
+      }
+      for (const pl of Object.values(payload.plans)) {
+        for (const l of pl.lines) {
+          if (!m.has(l.itemCode) || !m.get(l.itemCode)?.description) {
+            m.set(l.itemCode, {
+              feature: l.feature,
+              description: l.description,
+              customerCode: l.customerItemCode
+            });
+          }
+        }
+      }
+      masterMetaMapRef.current = m;
+      basePlansRef.current = payload.plans;
+
       setStockItems(filteredStock);
       setLrPairs(buildLrPairsFromStock(filteredStock));
       setPlans(payload.plans);
@@ -116,25 +139,22 @@ export function App() {
   useEffect(() => {
     loadInitialDataset();
 
-    // Listen to Vite HMR custom event when repo Excel files change externally / via OneDrive watcher
     const metaHot = (import.meta as any).hot;
     if (metaHot) {
       metaHot.on('repo-data-updated', (data: any) => {
         loadInitialDataset();
         setLastSyncLog(
-          `[Realtime Auto-Sync] Phát hiện thay đổi file ${data?.file || 'Stock list.xlsx'} -> Đã tự động cập nhật lúc ${new Date().toLocaleTimeString('vi-VN')}`
+          `Đã cập nhật dữ liệu từ file ${data?.file || 'Stock list.xlsx'} lúc ${new Date().toLocaleTimeString('vi-VN')}`
         );
       });
     }
-
-    return () => {
-      if (watchTimerRef.current) window.clearInterval(watchTimerRef.current);
-    };
   }, []);
 
-  // Build metadata map for preserving descriptions when re-uploading Stock list.xlsx
+  // Build metadata map for preserving descriptions when uploading Stock list.xlsx
   const existingMetaMap = useMemo(() => {
-    const m = new Map<string, { feature: string; description: string; customerCode: string }>();
+    const m = new Map<string, { feature: string; description: string; customerCode: string }>(
+      masterMetaMapRef.current
+    );
     for (const s of stockItems) {
       m.set(s.code, {
         feature: s.feature,
@@ -153,6 +173,7 @@ export function App() {
         }
       }
     }
+    masterMetaMapRef.current = m;
     return m;
   }, [stockItems, plans]);
 
@@ -233,7 +254,7 @@ export function App() {
     setLastSyncLog(`Đã hoàn tác xuất ${last.contLabel} (PO: ${last.po}) và khôi phục tồn kho.`);
   };
 
-  // Helper to convert ArrayBuffer to base64 and sync with backend repo API
+  // Helper to convert ArrayBuffer to base64 and sync with backend repo API (if running dev server)
   const syncBufferToBackendRepo = async (
     buf: ArrayBuffer,
     fileType: 'stock' | 'monthly' | 'weekly',
@@ -260,7 +281,7 @@ export function App() {
     } catch {
       // Static hosting fallback: works 100% in-browser even without backend
     }
-    return 'Đã xử lý trực tiếp trên trình duyệt';
+    return 'Đã tính đối soát trực tiếp trên trình duyệt';
   };
 
   // Upload handler for Stock, Monthly Plan, Weekly Plan
@@ -269,119 +290,72 @@ export function App() {
     type: 'stock' | 'monthly' | 'weekly',
     autoGitPush = true
   ) => {
-    const buf = await file.arrayBuffer();
-    if (type === 'stock') {
-      const parsed = parseStockWorkbook(buf, existingMetaMap);
-      setStockItems(parsed.stockItems);
-      setLrPairs(parsed.lrPairs);
-      const statusMsg = await syncBufferToBackendRepo(buf, 'stock', file.name, autoGitPush);
-      setLastVerifiedAt(new Date().toLocaleTimeString('vi-VN'));
-      setLastSyncLog(
-        `Đã nhập File Tồn Kho "${file.name}": Kho 01 (${parsed.wh01Rows} lô) + Kho 60 (${parsed.wh60Rows} lô) = ${parsed.stockItems.length} mã • ${statusMsg}`
-      );
-    } else if (type === 'monthly') {
-      const parsedPlans = parseShipmentWorkbook(buf, 'monthly');
-      setPlans((prev) => ({ ...prev, ...parsedPlans }));
-      const firstKey = Object.keys(parsedPlans)[0];
-      if (firstKey) setActivePlanKey(firstKey);
-      const statusMsg = await syncBufferToBackendRepo(buf, 'monthly', file.name, autoGitPush);
-      setLastVerifiedAt(new Date().toLocaleTimeString('vi-VN'));
-      setLastSyncLog(
-        `Đã nhập File Kế Hoạch Tháng "${file.name}" (${Object.keys(parsedPlans).join(', ')}) • ${statusMsg}`
-      );
-    } else if (type === 'weekly') {
-      const parsedPlans = parseShipmentWorkbook(buf, 'weekly');
-      setPlans((prev) => ({ ...prev, ...parsedPlans }));
-      const wkKey =
-        Object.keys(parsedPlans).find((k) => k.toLowerCase().includes('wk')) ||
-        Object.keys(parsedPlans)[0];
-      if (wkKey) setActivePlanKey(wkKey);
-      const statusMsg = await syncBufferToBackendRepo(buf, 'weekly', file.name, autoGitPush);
-      setLastVerifiedAt(new Date().toLocaleTimeString('vi-VN'));
-      setLastSyncLog(
-        `Đã nhập File Kế Hoạch Tuần "${file.name}" (${wkKey}) • ${statusMsg}`
-      );
-    }
-  };
-
-  // Start Browser Live File Watcher for OneDrive Stock list.xlsx
-  const handleStartBrowserLiveWatch = async (autoGitPush: boolean) => {
-    const anyWin = window as any;
-    if (!anyWin.showOpenFilePicker) {
-      alert(
-        'Trình duyệt hiện tại không hỗ trợ File System Access API. Vui lòng chọn file qua nút Nhập File Tồn Kho hoặc dùng Chrome/Edge.'
-      );
-      return;
-    }
+    setIsReconcilingStock(true);
     try {
-      const [handle] = await anyWin.showOpenFilePicker({
-        types: [
-          {
-            description: 'Excel Stock List (OneDrive)',
-            accept: {
-              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx', '.xls']
-            }
-          }
-        ],
-        multiple: false
-      });
-      fileHandleRef.current = handle;
-      const initialFile: File = await handle.getFile();
-      lastModifiedRef.current = initialFile.lastModified;
-      setLiveWatchFileName(initialFile.name);
-      setLiveWatchActive(true);
-
-      await handleUploadFile(initialFile, 'stock', autoGitPush);
-
-      if (watchTimerRef.current) window.clearInterval(watchTimerRef.current);
-      watchTimerRef.current = window.setInterval(async () => {
-        try {
-          if (!fileHandleRef.current) return;
-          const currentFile: File = await fileHandleRef.current.getFile();
-          if (currentFile.lastModified > lastModifiedRef.current) {
-            lastModifiedRef.current = currentFile.lastModified;
-            await handleUploadFile(currentFile, 'stock', autoGitPush);
-          }
-        } catch (err) {
-          console.error('Live watch poll error:', err);
+      const buf = await file.arrayBuffer();
+      if (type === 'stock') {
+        const parsed = parseStockWorkbook(buf, existingMetaMap);
+        // Reset any previous exported container deductions when importing a fresh stock file
+        const targetPlans =
+          exportedHistory.length > 0 && Object.keys(basePlansRef.current).length > 0
+            ? basePlansRef.current
+            : plans;
+        if (exportedHistory.length > 0 && Object.keys(basePlansRef.current).length > 0) {
+          setPlans(basePlansRef.current);
+          setExportedHistory([]);
         }
-      }, 2500);
-    } catch {
-      // User cancelled picker
-    }
-  };
+        setStockItems(parsed.stockItems);
+        setLrPairs(parsed.lrPairs);
+        setActiveStockFileName(file.name);
 
-  const handleStopBrowserLiveWatch = () => {
-    if (watchTimerRef.current) {
-      window.clearInterval(watchTimerRef.current);
-      watchTimerRef.current = null;
-    }
-    fileHandleRef.current = null;
-    setLiveWatchActive(false);
-    setLiveWatchFileName(null);
-    setLastSyncLog('Đã dừng chế độ theo dõi Realtime file OneDrive.');
-  };
-
-  const handleServerOneDriveSync = async (folderPath: string, autoGitPush: boolean) => {
-    try {
-      const res = await fetch('/api/onedrive-Config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ folderPath, autoGitPush })
-      });
-      const data = await res.json();
-      if (data.ok) {
-        await loadInitialDataset();
-        setLastSyncLog(
-          `Đã đồng bộ thành công Stock list.xlsx từ "${data.syncedFrom}" lúc ${new Date().toLocaleTimeString('vi-VN')}`
+        const currentPlanObj =
+          targetPlans[activePlanKey] || Object.values(targetPlans)[0];
+        const reconPreview = reconcileShipmentPlan(
+          parsed.stockItems,
+          currentPlanObj ? currentPlanObj.lines : [],
+          allocationMode
         );
-      } else {
-        setLastSyncLog(data.message || 'Không tìm thấy đường dẫn trên máy chủ.');
+
+        const statusMsg = await syncBufferToBackendRepo(buf, 'stock', file.name, autoGitPush);
+        setLastVerifiedAt(new Date().toLocaleTimeString('vi-VN'));
+        setLastSyncLog(
+          `Đã nhập File Tồn Kho "${file.name}" & tính đối soát: Kho 01 (${parsed.wh01Rows} lô) + Kho 60 (${parsed.wh60Rows} lô) = ${parsed.stockItems.length} mã • Kết quả: ${reconPreview.fulfilledPos.length} Cont đủ hàng / ${reconPreview.shortagePos.length} Cont thiếu hàng • ${statusMsg}`
+        );
+      } else if (type === 'monthly') {
+        const parsedPlans = parseShipmentWorkbook(buf, 'monthly');
+        setPlans((prev) => {
+          const next = { ...prev, ...parsedPlans };
+          basePlansRef.current = next;
+          return next;
+        });
+        setExportedHistory([]);
+        const firstKey = Object.keys(parsedPlans)[0];
+        if (firstKey) setActivePlanKey(firstKey);
+        const statusMsg = await syncBufferToBackendRepo(buf, 'monthly', file.name, autoGitPush);
+        setLastVerifiedAt(new Date().toLocaleTimeString('vi-VN'));
+        setLastSyncLog(
+          `Đã nhập File Kế Hoạch Tháng "${file.name}" (${Object.keys(parsedPlans).join(', ')}) & tính đối soát • ${statusMsg}`
+        );
+      } else if (type === 'weekly') {
+        const parsedPlans = parseShipmentWorkbook(buf, 'weekly');
+        setPlans((prev) => {
+          const next = { ...prev, ...parsedPlans };
+          basePlansRef.current = next;
+          return next;
+        });
+        setExportedHistory([]);
+        const wkKey =
+          Object.keys(parsedPlans).find((k) => k.toLowerCase().includes('wk')) ||
+          Object.keys(parsedPlans)[0];
+        if (wkKey) setActivePlanKey(wkKey);
+        const statusMsg = await syncBufferToBackendRepo(buf, 'weekly', file.name, autoGitPush);
+        setLastVerifiedAt(new Date().toLocaleTimeString('vi-VN'));
+        setLastSyncLog(
+          `Đã nhập File Kế Hoạch Tuần "${file.name}" (${wkKey}) & tính đối soát • ${statusMsg}`
+        );
       }
-    } catch {
-      setLastSyncLog(
-        'Mẹo: Nhấn nút "Kết Nối File Stock list.xlsx Trong OneDrive (Realtime)" ở trên để trình duyệt tự động đọc trực tiếp từ thư mục OneDrive trên máy tính của anh!'
-      );
+    } finally {
+      setIsReconcilingStock(false);
     }
   };
 
@@ -453,7 +427,7 @@ export function App() {
                 </span>
               </div>
               <p className="text-xs text-slate-400">
-                Báo cáo Tồn Kho Thành Phẩm 3D (Trái/Phải) & Đối Soát Kế Hoạch Xuất Hàng Tháng / Tuần • Đồng Bộ OneDrive Realtime
+                Báo cáo Tồn Kho Thành Phẩm 3D (Trái/Phải) & Đối Soát Kế Hoạch Xuất Hàng Tháng / Tuần
               </p>
             </div>
           </div>
@@ -462,7 +436,7 @@ export function App() {
           <div className="flex flex-wrap items-center gap-2">
             {/* Plan Switcher Pills */}
             <div className="inline-flex rounded-xl border border-slate-800 bg-slate-900 p-1">
-              {Object.entries(plans).map(([key, pl]) => (
+              {Object.entries(plans).map(([key]) => (
                 <button
                   key={key}
                   onClick={() => setActivePlanKey(key)}
@@ -483,15 +457,18 @@ export function App() {
               ))}
             </div>
 
-            {/* 3 Direct Source Import Buttons + Hub Modal Button */}
-            <div className="flex items-center gap-1.5 rounded-xl border border-cyan-500/30 bg-slate-900/90 p-1">
+            {/* Direct Source Import Buttons (Prominent Nhập Tồn Kho to pick file & calculate reconciliation) */}
+            <div className="flex items-center gap-1.5 rounded-xl border border-cyan-500/35 bg-slate-900/95 p-1">
               <button
                 onClick={() => quickStockInputRef.current?.click()}
-                className="inline-flex items-center gap-1 rounded-lg bg-cyan-500/15 px-2.5 py-1.5 text-xs font-semibold text-cyan-300 hover:bg-cyan-500 hover:text-slate-950 transition cursor-pointer"
-                title="Nhập File Tồn Kho (Stock list.xlsx)"
+                disabled={isReconcilingStock}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-cyan-400 to-sky-500 px-3.5 py-1.5 text-xs font-extrabold text-slate-950 shadow-md shadow-cyan-500/20 hover:brightness-110 transition cursor-pointer"
+                title="Chọn File Tồn Kho (Stock list.xlsx) từ máy tính để tính đối soát ngay"
               >
                 <Upload className="h-3.5 w-3.5" />
-                <span>Nhập Tồn Kho</span>
+                <span>
+                  {isReconcilingStock ? 'Đang Tính Đối Soát...' : 'Nhập Tồn Kho & Tính Đối Soát'}
+                </span>
               </button>
               <button
                 onClick={() => quickMonthlyInputRef.current?.click()}
@@ -511,13 +488,11 @@ export function App() {
               </button>
               <button
                 onClick={() => setIsImportModalOpen(true)}
-                className="inline-flex items-center gap-1 rounded-lg bg-sky-500/20 border border-sky-500/40 px-2.5 py-1.5 text-xs font-bold text-sky-300 hover:bg-sky-500 hover:text-slate-950 transition cursor-pointer"
-                title="Mở Trung Tâm Đồng Bộ OneDrive Realtime & Quản Lý Nguồn"
+                className="inline-flex items-center gap-1 rounded-lg bg-slate-800 border border-slate-700 px-2.5 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-700 hover:text-white transition cursor-pointer"
+                title="Mở bảng quản lý nhập các file nguồn & đối soát"
               >
-                <Cloud className="h-3.5 w-3.5" />
-                <span>
-                  {liveWatchActive ? `OneDrive Live (${liveWatchFileName})` : 'OneDrive Realtime'}
-                </span>
+                <Calculator className="h-3.5 w-3.5 text-cyan-400" />
+                <span>Quản Lý File Nguồn</span>
               </button>
             </div>
 
@@ -559,6 +534,27 @@ export function App() {
 
       {/* Main Content Container */}
       <main className="mx-auto w-full max-w-[1600px] flex-1 px-4 sm:px-6 py-5 space-y-5">
+        {/* Status Banner for Stock File Import & Reconciliation */}
+        {lastSyncLog && (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-cyan-500/35 bg-slate-900/90 px-4 py-2.5 text-xs">
+            <div className="flex items-center gap-2 text-slate-200">
+              <Database className="h-4 w-4 text-cyan-400 shrink-0" />
+              <span>
+                <strong className="text-cyan-300">Trạng thái Đối soát Tồn kho:</strong> {lastSyncLog}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => quickStockInputRef.current?.click()}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-500/20 border border-cyan-500/40 px-3 py-1 text-xs font-bold text-cyan-300 hover:bg-cyan-500 hover:text-slate-950 transition cursor-pointer"
+              >
+                <Upload className="h-3.5 w-3.5" />
+                <span>Chọn File Tồn Kho Khác Để Tính Đối Soát</span>
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* 1. Animated KPI Cards */}
         <KpiCardsSection
           stockItems={stockItems}
@@ -580,6 +576,8 @@ export function App() {
           reconciliation={reconciliation}
           activePlanName={activePlan.name}
           lastVerifiedAt={lastVerifiedAt}
+          activeStockFileName={activeStockFileName}
+          onTriggerStockUpload={() => quickStockInputRef.current?.click()}
           onRunAuditAgain={() => {
             setLrPairs(buildLrPairsFromStock(stockItems));
             setLastVerifiedAt(new Date().toLocaleTimeString('vi-VN'));
@@ -624,27 +622,24 @@ export function App() {
           onExportContainer={handleExportContainer}
           exportedContainersLog={exportedHistory}
           onUndoLastExportContainer={handleUndoLastExportContainer}
+          onTriggerStockUpload={() => quickStockInputRef.current?.click()}
         />
       </main>
 
       {/* Footer */}
       <footer className="border-t border-slate-900 bg-slate-950/90 py-4 px-6 text-center text-xs text-slate-500">
-        LPVN 3D Warehouse & Container Shipment Reconciliation System • Dữ liệu đối soát tự động từ{' '}
-        <code className="text-slate-300">Stock list.xlsx</code> (Kho 01 & 60) và{' '}
-        <code className="text-slate-300">NOV. SHIPMENT -OCT22.xlsx</code> • Hỗ trợ OneDrive Realtime Sync
+        LPVN 3D Warehouse & Container Shipment Reconciliation System • Đối soát trực tiếp từ File Tồn Kho{' '}
+        <code className="text-slate-300">{activeStockFileName}</code> (Kho 01 & 60) và Kế Hoạch Xuất Hàng{' '}
+        <code className="text-slate-300">NOV. SHIPMENT -OCT22.xlsx</code>
       </footer>
 
-      {/* Data Source Import & OneDrive Realtime Sync Modal */}
+      {/* Data Source Import & Reconciliation Modal */}
       <DataImportAndOneDriveModal
         isOpen={isImportModalOpen}
         onClose={() => setIsImportModalOpen(false)}
         onUploadFile={handleUploadFile}
-        liveWatchActive={liveWatchActive}
-        liveWatchFileName={liveWatchFileName}
         lastSyncLog={lastSyncLog}
-        onStartBrowserLiveWatch={handleStartBrowserLiveWatch}
-        onStopBrowserLiveWatch={handleStopBrowserLiveWatch}
-        onServerOneDriveSync={handleServerOneDriveSync}
+        activeStockFileName={activeStockFileName}
       />
     </div>
   );

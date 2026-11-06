@@ -309,7 +309,7 @@ export const QuickFillStockSearch: React.FC<QuickFillStockSearchProps> = ({
         <div className="mt-3 rounded-xl border border-indigo-500/40 bg-slate-950/95 p-4">
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-bold text-indigo-300">
-              Dán Danh Sách Mã Hàng (Stock Code) Hoặc Mã Model Từ Excel / OneDrive:
+              Dán Danh Sách Mã Hàng (Stock Code) Hoặc Mã Model Từ Excel:
             </span>
             <button
               onClick={() => setShowBatchModal(false)}

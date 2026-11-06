@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 
-// Built-in Realtime OneDrive & Repository Sync Middleware for Vite
+// Built-in Repository Sync Middleware for Vite
 function realtimeRepoSyncPlugin() {
   return {
     name: 'realtime-repo-sync',
@@ -14,7 +14,7 @@ function realtimeRepoSyncPlugin() {
       const stockPath = path.join(rootDir, 'Stock list.xlsx');
       const shipPath = path.join(rootDir, 'NOV. SHIPMENT -OCT22.xlsx');
 
-      // Watch Stock list.xlsx & NOV. SHIPMENT -OCT22.xlsx for external/OneDrive changes
+      // Watch Stock list.xlsx & NOV. SHIPMENT -OCT22.xlsx for local changes
       let debounceTimer: ReturnType<typeof setTimeout> | null = null;
       const triggerRebuildData = (changedFile: string) => {
         if (debounceTimer) clearTimeout(debounceTimer);
@@ -70,7 +70,7 @@ function realtimeRepoSyncPlugin() {
             if (autoGitPush) {
               try {
                 execSync(
-                  `git add "${targetName}" public/data/initial-data.json && git commit -m "chore(sync): realtime update ${targetName} from OneDrive/User" && git push origin main`,
+                  `git add "${targetName}" public/data/initial-data.json && git commit -m "chore(sync): update ${targetName} from user import" && git push origin main`,
                   { cwd: rootDir }
                 );
                 gitStatus = 'Committed & pushed to origin/main';
@@ -94,46 +94,6 @@ function realtimeRepoSyncPlugin() {
             res.end(JSON.stringify({ ok: false, error: err?.message || 'Unknown error' }));
           }
         });
-      });
-
-      server.middlewares.use('/api/onedrive-Config', (req: any, res: any, next: any) => {
-        if (req.method === 'POST') {
-          const chunks: Buffer[] = [];
-          req.on('data', (c: Buffer) => chunks.push(c));
-          req.on('end', () => {
-            try {
-              const { folderPath, autoGitPush } = JSON.parse(Buffer.concat(chunks).toString('utf-8'));
-              const candidate = path.join(folderPath || '', 'Stock list.xlsx');
-              if (fs.existsSync(candidate)) {
-                fs.copyFileSync(candidate, stockPath);
-                execSync('python3 scripts/build_data.py', { cwd: rootDir });
-                if (autoGitPush) {
-                  try {
-                    execSync(
-                      'git add "Stock list.xlsx" public/data/initial-data.json && git commit -m "chore(onedrive): auto-sync Stock list.xlsx" && git push origin main',
-                      { cwd: rootDir }
-                    );
-                  } catch {}
-                }
-                res.setHeader('Content-Type', 'application/json');
-                res.end(JSON.stringify({ ok: true, syncedFrom: candidate, timestamp: new Date().toISOString() }));
-              } else {
-                res.setHeader('Content-Type', 'application/json');
-                res.end(
-                  JSON.stringify({
-                    ok: false,
-                    message: `Không tìm thấy ${candidate} trên máy chủ, vui lòng dùng nút Kết Nối File OneDrive Trực Tiếp (Live File Handle) trên trình duyệt.`
-                  })
-                );
-              }
-            } catch (e: any) {
-              res.statusCode = 500;
-              res.end(JSON.stringify({ ok: false, error: e?.message }));
-            }
-          });
-          return;
-        }
-        next();
       });
     }
   };

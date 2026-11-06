@@ -1,6 +1,6 @@
 # LPVN Smart Warehouse 3D & Container Shipment Reconciliation Hub
 
-Hệ thống Web Dashboard 3D động & Đối soát Kế hoạch Xuất hàng Container theo Tháng / Tuần với Tồn kho **Kho 01** và **Kho 60**, tích hợp **Multi-Agent Verification Engine** và **OneDrive Realtime Auto-Sync**.
+Hệ thống Web Dashboard 3D động & Đối soát Kế hoạch Xuất hàng Container theo Tháng / Tuần với Tồn kho **Kho 01** và **Kho 60**, tích hợp **Multi-Agent Verification Engine**.
 
 ## 1. Kết Quả Đối Soát Chuẩn Xác Từ 2 File Nguồn Trên Repo
 - **File Tồn Kho (`Stock list.xlsx` — Sheet `Stock Balance With Batch`)**:
@@ -20,15 +20,12 @@ Hệ thống Web Dashboard 3D động & Đối soát Kế hoạch Xuất hàng C
   - **Kế hoạch tuần (`OCT-WK 42`)**: `52` dòng đơn hàng thuộc `4` PO (`PKL# 245` đến `248`):
     - **`46` dòng đủ hàng xuất** (`2` PO đủ 100%: `436862`, `436864`) | **`6` dòng thiếu hàng** (`2` PO thiếu: `0201-0003002760`, `436866`).
 
-## 2. Khởi Chạy Ứng Dụng & Đồng Bộ OneDrive Realtime
+## 2. Khởi Chạy Ứng Dụng & Nhập File Tồn Kho Để Tính Đối Soát
 
 ```bash
 # Cài đặt thư viện
 npm install
 
-# Chạy ứng dụng Web (tự động theo dõi file Stock list.xlsx & NOV. SHIPMENT -OCT22.xlsx)
+# Chạy ứng dụng Web
 npm run dev
-
-# Hoặc chạy tiến trình đồng bộ OneDrive -> Repo -> Git main tự động
-ONE_DRIVE_DIR="/path/to/OneDrive/stock list" AUTO_GIT_PUSH=true npm run watch-onedrive
 ```

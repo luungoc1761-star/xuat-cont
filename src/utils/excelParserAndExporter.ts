@@ -85,13 +85,38 @@ export function parseStockWorkbook(
     }
   >();
 
+  let codeCol = 0;
+  let whCol = 1;
+  let dateCol = 2;
+  let batchCol = 3;
+  let binCol = 4;
+  let qtyCol = 5;
+
+  if (rows.length > 0 && Array.isArray(rows[0])) {
+    const hdr = rows[0].map((c: any) => String(c ?? '').trim().toLowerCase());
+    const cIdx = hdr.findIndex((h) => h.includes('stock code') || h.includes('item code') || h === 'code');
+    const wIdx = hdr.findIndex((h) => h.includes('wearhouse') || h.includes('warehouse') || h === 'wh' || h.includes('kho'));
+    const dIdx = hdr.findIndex((h) => h.includes('date') || h.includes('createdate'));
+    const bIdx = hdr.findIndex((h) => h.includes('batch') || h.includes('lot'));
+    const binIdx = hdr.findIndex((h) => h === 'bin' || h.includes('vị trí') || h.includes('location'));
+    const qIdx = hdr.findIndex((h) => h.includes('qty') || h.includes('quantity') || h.includes('số lượng'));
+
+    if (cIdx >= 0) codeCol = cIdx;
+    if (wIdx >= 0) whCol = wIdx;
+    if (dIdx >= 0) dateCol = dIdx;
+    if (bIdx >= 0) batchCol = bIdx;
+    if (binIdx >= 0) binCol = binIdx;
+    if (qIdx >= 0) qtyCol = qIdx;
+  }
+
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
     if (!row || row.length < 2) continue;
-    const code = String(row[0] ?? '').trim();
-    let wh = String(row[1] ?? '').trim();
-    if (wh === '1') wh = '01';
-    const qty = Number(row[5] ?? 0) || 0;
+    const code = String(row[codeCol] ?? '').trim();
+    let wh = String(row[whCol] ?? '').trim();
+    if (wh === '1' || wh === '001') wh = '01';
+    const rawQtyStr = String(row[qtyCol] ?? '0').replace(/,/g, '').trim();
+    const qty = Number(rawQtyStr) || 0;
     if (!code) continue;
     rawCount++;
 
@@ -111,9 +136,9 @@ export function parseStockWorkbook(
     if (wh === '01') wh01Rows++;
     if (wh === '60') wh60Rows++;
 
-    const cdate = formatExcelDate(row[2]);
-    const batch = String(row[3] ?? '').trim();
-    const bin = String(row[4] ?? '').trim();
+    const cdate = formatExcelDate(row[dateCol]);
+    const batch = String(row[batchCol] ?? '').trim();
+    const bin = String(row[binCol] ?? '').trim();
 
     const entry = byCode.get(code) || {
       wh01Qty: 0,

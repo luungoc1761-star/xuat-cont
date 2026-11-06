@@ -8,8 +8,7 @@
     "build": "node scripts/deploy_pages.mjs",
     "deploy": "node scripts/deploy_pages.mjs",
     "preview": "vite preview --host 0.0.0.0",
-    "sync-data": "python3 scripts/build_data.py",
-    "watch-onedrive": "node server/onedrive-watcher.mjs"
+    "sync-data": "python3 scripts/build_data.py"
   },
   "dependencies": {
     "lucide-react": "^0.475.0",

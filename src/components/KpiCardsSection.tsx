@@ -261,7 +261,7 @@ export const KpiCardsSection: React.FC<KpiCardsSectionProps> = ({
         </div>
       </div>
 
-      {/* KPI 6: Trạng Thái Đối Soát Multi-Agent & OneDrive */}
+      {/* KPI 6: Trạng Thái Đối Soát Multi-Agent */}
       <div className="group relative rounded-2xl border border-teal-500/30 bg-slate-900/80 p-4 backdrop-blur-xl shadow-lg hover:border-teal-400/60 hover:-translate-y-1 transition-all duration-300 overflow-hidden">
         <div className="flex items-center justify-between">
           <span className="text-xs font-semibold uppercase tracking-wider text-teal-300">

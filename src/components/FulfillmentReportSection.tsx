@@ -9,7 +9,8 @@ import {
   PackageCheck,
   PackageX,
   Ship,
-  Columns
+  Columns,
+  Upload
 } from 'lucide-react';
 import {
   AllocationMode,
@@ -46,6 +47,7 @@ interface FulfillmentReportSectionProps {
     timestamp: string;
   }>;
   onUndoLastExportContainer?: () => void;
+  onTriggerStockUpload?: () => void;
 }
 
 export const FulfillmentReportSection: React.FC<FulfillmentReportSectionProps> = ({
@@ -61,7 +63,8 @@ export const FulfillmentReportSection: React.FC<FulfillmentReportSectionProps> =
   setActiveTab,
   onExportContainer,
   exportedContainersLog = [],
-  onUndoLastExportContainer
+  onUndoLastExportContainer,
+  onTriggerStockUpload
 }) => {
   const [customerFilter, setCustomerFilter] = useState<string>('ALL');
   const [poFilter, setPoFilter] = useState<string>('ALL');
@@ -161,8 +164,18 @@ export const FulfillmentReportSection: React.FC<FulfillmentReportSectionProps> =
           </p>
         </div>
 
-        {/* Allocation Mode Toggle + Export Excel Buttons */}
+        {/* Allocation Mode Toggle + Import Stock + Export Excel Buttons */}
         <div className="flex flex-wrap items-center gap-2.5">
+          {onTriggerStockUpload && (
+            <button
+              onClick={onTriggerStockUpload}
+              className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-400 to-sky-500 px-4 py-2.5 text-xs font-extrabold text-slate-950 shadow-lg shadow-cyan-500/25 hover:brightness-110 transition cursor-pointer"
+              title="Chọn file tồn kho (Stock list.xlsx) từ máy tính để tính đối soát lại toàn bộ Cont"
+            >
+              <Upload className="h-4 w-4" />
+              <span>Nhập Tồn Kho (Chọn File & Tính Đối Soát)</span>
+            </button>
+          )}
           <div className="inline-flex rounded-xl border border-slate-700/80 bg-slate-900 p-1">
             <button
               onClick={() => setAllocationMode('direct')}
